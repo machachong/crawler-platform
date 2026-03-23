@@ -23,6 +23,27 @@ jobs:
         run: |
           cd backend && PYTHONPATH=. pytest ../tests/test_integration.py
 
+  build-and-deploy-frontend:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Set up Node
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+      - name: Install dependencies
+        run: |
+          cd frontend && npm install
+      - name: Build
+        run: |
+          cd frontend && npm run build
+      - name: Deploy to GitHub Pages
+        uses: JamesIves/github-pages-deploy-action@v4
+        with:
+          folder: frontend/dist
+          branch: gh-pages
+
   build-and-push-docker:
     needs: test
     runs-on: ubuntu-latest
