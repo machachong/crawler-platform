@@ -6,9 +6,8 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
-  pages: write
-  id-token: write
+  contents: write
+  packages: write
 
 jobs:
   test:
@@ -18,7 +17,8 @@ jobs:
       - name: Run tests
         run: echo "Skip tests for deployment check"
 
-  build:
+  build-and-deploy-frontend:
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -27,24 +27,18 @@ jobs:
         with:
           node-version: '18'
       - name: Install dependencies
-        run: cd frontend && npm install
+        run: |
+          cd frontend && npm install
       - name: Build
-        run: cd frontend && npm run build
-      - name: Upload artifact
-        uses: actions/upload-pages-artifact@v3 # 升级到 v3 (对应内部 upload-artifact v4)
-        with:
-          path: frontend/dist
-
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
+        run: |
+          cd frontend && npm run build
       - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4 # 升级到 v4
+        uses: JamesIves/github-pages-deploy-action@v4
+        with:
+          folder: frontend/dist
+          branch: gh-pages # 指定部署到 gh-pages 分支
+          token: ${{ secrets.GITHUB_TOKEN }}
+          clean: true
 
   build-and-push-ghcr:
     needs: test
