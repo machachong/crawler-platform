@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write # 必须给 write 权限，JamesIves Action 才能推送到 gh-pages 分支
   packages: write
   pages: write
   id-token: write
@@ -25,7 +25,6 @@ jobs:
           pip install pytest fastapi httpx sqlalchemy pydantic
       - name: Run tests
         run: |
-          # 暂时跳过测试以验证部署，后续可恢复
           echo "Skip tests for deployment check"
 
   build-and-deploy-frontend:
@@ -48,6 +47,7 @@ jobs:
         with:
           folder: frontend/dist
           branch: gh-pages
+          token: ${{ secrets.GITHUB_TOKEN }} # 显式传入 token
 
   build-and-push-ghcr:
     needs: test
