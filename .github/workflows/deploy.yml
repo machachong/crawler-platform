@@ -6,8 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
-  packages: write
+  contents: read
   pages: write
   id-token: write
 
@@ -16,19 +15,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.10'
-      - name: Install dependencies
-        run: |
-          pip install pytest fastapi httpx sqlalchemy pydantic
       - name: Run tests
-        run: |
-          echo "Skip tests for deployment check"
+        run: echo "Skip tests for deployment check"
 
-  build-and-deploy-frontend:
-    needs: test
+  build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
@@ -37,22 +27,31 @@ jobs:
         with:
           node-version: '18'
       - name: Install dependencies
-        run: |
-          cd frontend && npm install
+        run: cd frontend && npm install
       - name: Build
-        run: |
-          cd frontend && npm run build
-      - name: Deploy to GitHub Pages
-        uses: JamesIves/github-pages-deploy-action@v4
+        run: cd frontend && npm run build
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v2
         with:
-          folder: frontend/dist
-          branch: gh-pages
-          token: ${{ secrets.GITHUB_TOKEN }}
-          single-commit: true # 减少提交历史，让部署更轻量
+          path: frontend/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v2
 
   build-and-push-ghcr:
     needs: test
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v3
       - name: Login to GHCR
