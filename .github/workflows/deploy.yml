@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write # 必须给 write 权限，JamesIves Action 才能推送到 gh-pages 分支
+  contents: write
   packages: write
   pages: write
   id-token: write
@@ -47,7 +47,8 @@ jobs:
         with:
           folder: frontend/dist
           branch: gh-pages
-          token: ${{ secrets.GITHUB_TOKEN }} # 显式传入 token
+          token: ${{ secrets.GITHUB_TOKEN }}
+          single-commit: true # 减少提交历史，让部署更轻量
 
   build-and-push-ghcr:
     needs: test
