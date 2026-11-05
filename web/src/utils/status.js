@@ -16,6 +16,10 @@ export function isActive(status) {
   return ['pending', 'crawling', 'cleaning', 'ai_processing'].includes(status);
 }
 
+export function resultStatus(status) {
+  return { ok: '正常', fetch_failed: '抓取失败', ai_failed: 'AI 提取失败', validation_failed: '字段校验失败', ai_pending: '待提取' }[status] || status;
+}
+
 export function domainOf(url) {
   try {
     return new URL(url).host;

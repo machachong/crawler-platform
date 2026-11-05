@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 
@@ -21,6 +22,18 @@ CRAWLER_USER_AGENT = os.getenv(
     "CrawlerPlatformBot/1.0 (+https://github.com/machachong/crawler-platform; respects robots.txt)",
 )
 DISABLE_CELERY = os.getenv("DISABLE_CELERY", "0") == "1"
+AUTH_SESSION_HOURS = int(os.getenv("AUTH_SESSION_HOURS", "8"))
+if not 1 <= AUTH_SESSION_HOURS <= 168:
+    raise ValueError("AUTH_SESSION_HOURS must be between 1 and 168")
+CORS_ORIGINS = [origin.strip() for origin in os.getenv(
+    "CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000"
+).split(",") if origin.strip()]
+PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
+if PUBLIC_BASE_URL:
+    _public_url = urlsplit(PUBLIC_BASE_URL)
+    if (_public_url.scheme not in {"http", "https"} or not _public_url.hostname
+            or _public_url.username or _public_url.password or _public_url.query or _public_url.fragment):
+        raise ValueError("PUBLIC_BASE_URL must be an http(s) public base URL without credentials/query/fragment")
 
 
 def openai_api_key() -> str:

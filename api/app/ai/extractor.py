@@ -6,6 +6,8 @@ import json
 import logging
 import os
 import re
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any
 
 import httpx
@@ -23,6 +25,23 @@ MISSING_KEY_MESSAGE = (
 
 class AIConfigError(RuntimeError):
     """Raised when extraction is requested but no API key is configured."""
+
+
+class AIBudgetError(AIConfigError):
+    pass
+
+
+_budget = ContextVar("ai_token_budget", default=None)
+
+
+@contextmanager
+def token_budget(limit: int):
+    meter = {"limit": limit, "spent": 0}
+    token = _budget.set(meter)
+    try:
+        yield meter
+    finally:
+        _budget.reset(token)
 
 
 def chunk_text(text: str, size: int | None = None, overlap: int | None = None) -> list[str]:
@@ -59,6 +78,9 @@ def parse_model_output(text: str) -> Any:
 
 
 def _chat(messages: list[dict[str, str]]) -> tuple[str, int]:
+    meter = _budget.get()
+    if meter is not None and meter["spent"] >= meter["limit"]:
+        raise AIBudgetError("已达到本次运行的 Token 预算，停止后续 AI 请求，已保留正文。")
     key = openai_api_key()
     if not key:
         raise AIConfigError(MISSING_KEY_MESSAGE)
@@ -77,6 +99,8 @@ def _chat(messages: list[dict[str, str]]) -> tuple[str, int]:
     content = payload["choices"][0]["message"]["content"] or ""
     usage = payload.get("usage") or {}
     tokens = int(usage.get("total_tokens") or 0)
+    if meter is not None:
+        meter["spent"] += tokens
     return content, tokens
 
 

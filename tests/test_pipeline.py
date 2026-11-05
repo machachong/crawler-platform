@@ -68,6 +68,7 @@ def test_site_mode_bfs_robots_and_ai(client, site, monkeypatch):
     calls = []
 
     def fake_extract(content, prompt):
+        assert prompt == "总结页面在卖什么，返回 JSON。"
         calls.append(content)
         return {"data": {"summary": "fruit"}, "token_usage": 7}
 
@@ -110,6 +111,12 @@ def test_site_mode_bfs_robots_and_ai(client, site, monkeypatch):
     assert home["extracted_data"]["skipped"] is True
     assert detail["token_usage"] == 7
     assert detail["status"] == "completed"
+    published = client.post(f"/api/v1/tasks/{task_id}/publication", json={"title": "本地采集报告"})
+    assert published.status_code == 200, published.text
+    page = client.get(f"/p/{published.json()['slug']}.html", headers={"Authorization": ""})
+    assert page.status_code == 200
+    assert "fruit" in page.text
+    assert "<title>本地采集报告</title>" in page.text
 
 
 def test_single_page_without_api_key_keeps_clean_text(client, site, monkeypatch):

@@ -6,3 +6,7 @@ __pycache__/
 *.db
 .mypy_cache/
 .ruff_cache/
+node_modules/
+dist/
+logs-*.out
+logs-*.err

@@ -13,12 +13,16 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
+from sqlalchemy import update
 
+from ..auth import get_current_user, require_writer
 from ..crawler.dedupe import UrlDedupe, clear_cancel, request_cancel
 from ..crawler.links import is_blocked_address, normalize_url
 from ..config import DISABLE_CELERY
 from ..database import get_db
-from ..models import CrawlResult, Task
+from ..models import CrawlResult, Task, User
+from ..runs import latest_run, start_run, sync_run, reset_for_run
+from ..scheduling import configure_schedule
 from ..schemas import (
     CrawlResultRead,
     TaskCreate,
@@ -26,6 +30,7 @@ from ..schemas import (
     TaskRead,
     normalize_config,
 )
+from ..publishing import html_response, render_page
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1", tags=["tasks"])
@@ -44,8 +49,17 @@ def _progress(phase: str = "pending", percent: int = 0) -> dict:
     }
 
 
-def _get_task(db: Session, task_id: UUID) -> Task:
-    task = db.query(Task).filter(Task.id == task_id).first()
+def _get_task(db: Session, task_id: UUID, user: User, lock: bool = False) -> Task:
+    query = db.query(Task).filter(Task.id == task_id)
+    if user.role != "admin":
+        query = query.filter(Task.owner_id == user.id)
+    if lock:
+        statement = update(Task).where(Task.id == task_id)
+        if user.role != "admin":
+            statement = statement.where(Task.owner_id == user.id)
+        # Also acquire a write lock on SQLite, where SELECT FOR UPDATE is ignored.
+        db.execute(statement.values(updated_at=Task.updated_at).execution_options(synchronize_session=False))
+    task = (query.populate_existing().with_for_update() if lock else query).first()
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
     return task
@@ -61,20 +75,29 @@ def _results(db: Session, task_id: UUID) -> list[CrawlResult]:
 
 
 def enqueue(task: Task, db: Session) -> None:
-    if DISABLE_CELERY:
-        return
+    run = latest_run(db, task.id)
+    task_id, run_id = task.id, run.id
     try:
         from ..worker.tasks import run_crawl_task
 
-        async_result = run_crawl_task.delay(str(task.id))
-        task.celery_task_id = async_result.id
+        async_result = run_crawl_task.apply_async(args=[str(task.id), str(run.id)], task_id=str(run.id))
+        db.refresh(task)
+        if latest_run(db, task.id).id == run.id:
+            task.celery_task_id = async_result.id
+        run.dispatched_at = datetime.utcnow()
         task.updated_at = datetime.utcnow()
         db.commit()
     except Exception as exc:
+        db.rollback()
+        task = db.get(Task, task_id, populate_existing=True)
+        current = latest_run(db, task_id)
+        if task is None or current is None or current.id != run_id:
+            return
         logger.exception("Failed to enqueue task %s", task.id)
         task.status = "failed"
         task.error_message = f"任务队列不可用，请确认 Redis 与 Celery worker 已启动。{exc}"
         task.updated_at = datetime.utcnow()
+        sync_run(db, task)
         db.commit()
 
 
@@ -88,20 +111,29 @@ def _validate_target(url: str) -> str:
 
 
 @router.post("/tasks", response_model=TaskRead)
-def create_task(payload: TaskCreate, db: Session = Depends(get_db)):
+def create_task(payload: TaskCreate, db: Session = Depends(get_db), user: User = Depends(require_writer)):
     target = _validate_target(str(payload.target_url))
+    mode = "single" if payload.config.is_preview else payload.mode
+    config = normalize_config(mode, payload.config)
+    if payload.config.is_preview:
+        config["schedule"] = "once"
     task = Task(
-        owner_id=(payload.owner_id or "local").strip() or "local",
+        owner_id=user.id,
         target_url=target,
-        mode=payload.mode,
+        mode=mode,
         prompt=(payload.prompt or "").strip(),
         status="pending",
-        config=normalize_config(payload.mode, payload.config),
+        config=config,
         progress=_progress(),
         pages_crawled=0,
         token_usage=0,
     )
     db.add(task)
+    db.flush()
+    from ..templates import bind_template
+    bind_template(db, task)
+    start_run(db, task, trigger="preview" if payload.config.is_preview else "create")
+    configure_schedule(db, task)
     db.commit()
     db.refresh(task)
     clear_cancel(str(task.id))
@@ -115,9 +147,13 @@ def list_tasks(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
 ):
+    query = db.query(Task)
+    if user.role != "admin":
+        query = query.filter(Task.owner_id == user.id)
     return (
-        db.query(Task)
+        query
         .order_by(Task.created_at.desc())
         .offset(offset)
         .limit(limit)
@@ -126,22 +162,29 @@ def list_tasks(
 
 
 @router.get("/tasks/{task_id}", response_model=TaskDetail)
-def get_task(task_id: UUID, db: Session = Depends(get_db)):
-    task = _get_task(db, task_id)
+def get_task(task_id: UUID, run_id: UUID | None = None, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    task = _get_task(db, task_id, user)
+    if run_id:
+        from ..models import TaskRun
+        run = db.query(TaskRun).filter(TaskRun.id == run_id, TaskRun.task_id == task.id).first()
+        if not run:
+            raise HTTPException(404, "运行记录不存在")
+        if run.snapshot:
+            return TaskDetail.model_validate(run.snapshot)
     detail = TaskDetail.model_validate(task)
     detail.results = [CrawlResultRead.model_validate(row) for row in _results(db, task.id)]
     return detail
 
 
 @router.get("/tasks/{task_id}/results", response_model=list[CrawlResultRead])
-def list_results(task_id: UUID, db: Session = Depends(get_db)):
-    _get_task(db, task_id)
+def list_results(task_id: UUID, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    _get_task(db, task_id, user)
     return _results(db, task_id)
 
 
 @router.post("/tasks/{task_id}/stop", response_model=TaskRead)
-def stop_task(task_id: UUID, db: Session = Depends(get_db)):
-    task = _get_task(db, task_id)
+def stop_task(task_id: UUID, db: Session = Depends(get_db), user: User = Depends(require_writer)):
+    task = _get_task(db, task_id, user, lock=True)
     if task.status in TERMINAL_STATUSES:
         return task
     request_cancel(str(task.id))
@@ -158,26 +201,21 @@ def stop_task(task_id: UUID, db: Session = Depends(get_db)):
     progress["phase"] = "stopped"
     task.progress = progress
     task.updated_at = datetime.utcnow()
+    sync_run(db, task)
     db.commit()
     db.refresh(task)
     return task
 
 
 @router.post("/tasks/{task_id}/rerun", response_model=TaskRead)
-def rerun_task(task_id: UUID, db: Session = Depends(get_db)):
-    task = _get_task(db, task_id)
+def rerun_task(task_id: UUID, db: Session = Depends(get_db), user: User = Depends(require_writer)):
+    task = _get_task(db, task_id, user, lock=True)
     if task.status in ACTIVE_STATUSES:
         raise HTTPException(status_code=409, detail="任务仍在执行，请先停止")
-    db.query(CrawlResult).filter(CrawlResult.task_id == task.id).delete()
+    reset_for_run(db, task)
     UrlDedupe(str(task.id)).clear()
     clear_cancel(str(task.id))
-    task.status = "pending"
-    task.error_message = None
-    task.pages_crawled = 0
-    task.token_usage = 0
-    task.celery_task_id = None
-    task.progress = _progress()
-    task.updated_at = datetime.utcnow()
+    start_run(db, task)
     db.commit()
     db.refresh(task)
     enqueue(task, db)
@@ -186,8 +224,8 @@ def rerun_task(task_id: UUID, db: Session = Depends(get_db)):
 
 
 @router.delete("/tasks/{task_id}")
-def delete_task(task_id: UUID, db: Session = Depends(get_db)):
-    task = _get_task(db, task_id)
+def delete_task(task_id: UUID, db: Session = Depends(get_db), user: User = Depends(require_writer)):
+    task = _get_task(db, task_id, user, lock=True)
     if task.status in ACTIVE_STATUSES:
         request_cancel(str(task.id))
         if task.celery_task_id and not DISABLE_CELERY:
@@ -241,11 +279,21 @@ def _export_rows(results: list[CrawlResult]) -> list[dict[str, str]]:
 @router.get("/tasks/{task_id}/export")
 def export_task(
     task_id: UUID,
-    format: str = Query("json", pattern="^(json|csv|md)$"),
+    format: str = Query("json", pattern="^(json|csv|md|html)$"),
+    run_id: UUID | None = None,
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
 ):
-    task = _get_task(db, task_id)
+    task = _get_task(db, task_id, user)
     results = _results(db, task.id)
+    if run_id:
+        detail = get_task(task_id, run_id, db, user)
+        task, results = detail, detail.results
+    if format == "html":
+        if task.status in ACTIVE_STATUSES:
+            raise HTTPException(409, "任务仍在执行，请等待结束或停止后再生成网页")
+        _, html = render_page(task, results)
+        return html_response(html, f"task-{task.id}.html")
     filename = f"task-{task.id}.{format if format != 'md' else 'md'}"
     if format == "json":
         detail = TaskDetail.model_validate(task)

@@ -1,4 +1,4 @@
-version: "3.8"
+﻿version: "3.8"
 
 services:
   db:
@@ -34,9 +34,17 @@ services:
       - ./api:/app
     ports:
       - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
     environment:
       DATABASE_URL: postgresql://user:pass@db:5432/crawler_db
       REDIS_URL: redis://redis:6379/0
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
+      AUTH_SESSION_HOURS: ${AUTH_SESSION_HOURS:-8}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_API_BASE: ${OPENAI_API_BASE:-https://api.openai.com/v1}
       AI_MODEL: ${AI_MODEL:-gpt-4o-mini}
@@ -63,6 +71,21 @@ services:
       CRAWLER_USER_AGENT: ${CRAWLER_USER_AGENT:-CrawlerPlatformBot/1.0 (+https://github.com/machachong/crawler-platform; respects robots.txt)}
     depends_on:
       db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  scheduler:
+    build: ./api
+    command: python scripts/scheduler.py
+    restart: unless-stopped
+    volumes:
+      - ./api:/app
+    environment:
+      DATABASE_URL: postgresql://user:pass@db:5432/crawler_db
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      api:
         condition: service_healthy
       redis:
         condition: service_healthy

@@ -10,6 +10,7 @@ Environment:
 from __future__ import annotations
 
 import json
+import getpass
 import os
 import sys
 import time
@@ -29,6 +30,12 @@ def main() -> int:
         health = client.get(f"{API_BASE}/health")
         health.raise_for_status()
         print("health", json.dumps(health.json(), ensure_ascii=False))
+
+        username = os.getenv("SMOKE_USERNAME") or input("Username: ")
+        password = os.getenv("SMOKE_PASSWORD") or getpass.getpass("Password: ")
+        signed_in = client.post(f"{API_BASE}/auth/login", json={"username": username, "password": password})
+        signed_in.raise_for_status()
+        client.headers["Authorization"] = "Bearer " + signed_in.json()["access_token"]
 
         created = client.post(
             f"{API_BASE}/tasks",
