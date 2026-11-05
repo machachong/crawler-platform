@@ -59,7 +59,7 @@ Postgres 数据在卷 `postgres_data`。首次启动会 `create_all` 建表。�
 服务起来之后：
 
 ```bash
-docker compose exec backend python scripts/smoke_test.py
+docker compose exec api python scripts/smoke_test.py
 ```
 
 脚本会创建单页任务并轮询。配了密钥时期望 `completed`；没配密钥时期望 `failed`，且结果里仍有清洗后的正文，错误含 `OPENAI_API_KEY`。
@@ -107,12 +107,12 @@ curl -s http://localhost:8000/api/v1/tasks/<id>
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r backend/requirements.txt -r backend/requirements-dev.txt
+pip install -r api/requirements.txt -r api/requirements-dev.txt
 export DATABASE_URL=postgresql://user:pass@localhost:5432/crawler_db
 export REDIS_URL=redis://localhost:6379/0
 export OPENAI_API_KEY=sk-...
 
-cd backend
+cd api
 uvicorn app.main:app --reload --port 8000
 # 另一个终端
 celery -A app.worker.tasks worker --loglevel=info
@@ -121,7 +121,7 @@ celery -A app.worker.tasks worker --loglevel=info
 前端：
 
 ```bash
-cd frontend
+cd web
 npm install
 npm run dev -- --host 0.0.0.0 --port 3000
 ```
@@ -131,7 +131,7 @@ npm run dev -- --host 0.0.0.0 --port 3000
 ## 测试
 
 ```bash
-pip install -r backend/requirements.txt -r backend/requirements-dev.txt
+pip install -r api/requirements.txt -r api/requirements-dev.txt
 pytest
 ```
 
