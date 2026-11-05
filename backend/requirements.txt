@@ -1,10 +1,14 @@
-fastapi
-uvicorn
-sqlalchemy
-pydantic
-psycopg2-binary
-celery
-redis
-httpx
-trafilatura
-python-dotenv
+fastapi>=0.110
+uvicorn[standard]>=0.27
+sqlalchemy>=2.0
+pydantic>=2.5
+email-validator>=2.0
+psycopg2-binary>=2.9
+celery>=5.3
+redis>=5.0
+httpx>=0.27
+python-dotenv>=1.0
+# HTTP Fetcher + Spider. markdownify powers Response.markdown().
+# Do not install the ai/mcp extra here; browsers are optional, see README.
+scrapling[fetchers]>=0.5.1,<0.6
+markdownify>=1.2.0

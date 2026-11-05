@@ -30,6 +30,8 @@ jobs:
         run: |
           cd frontend && npm install
       - name: Build
+        env:
+          VITE_BASE: /crawler-platform/
         run: |
           cd frontend && npm run build
       - name: Deploy to GitHub Pages
