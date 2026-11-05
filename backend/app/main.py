@@ -1,46 +1,51 @@
-from fastapi import FastAPI, HTTPException, BackgroundTasks
-from fastapi.middleware.cors import CORSMiddleware
-from typing import List
-from . import schemas
-import uuid
+import logging
 from datetime import datetime
 
-app = FastAPI(title="Self-Service Crawler API")
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
-# 开启 CORS 跨域支持
+from .api.tasks import router as task_router
+from .config import openai_api_key
+from .database import database_ok, init_db
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+app = FastAPI(title="自助爬虫平台", version="1.1.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 生产环境应限制为前端域名
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.include_router(task_router)
 
-# Mock Database
-tasks_db = {}
 
-@app.post("/api/v1/tasks", response_model=schemas.TaskRead)
-async def create_task(task: schemas.TaskCreate):
-    task_id = uuid.uuid4()
-    new_task = {
-        "id": task_id,
-        "target_url": str(task.target_url),
-        "mode": task.mode,
-        "prompt": task.prompt,
-        "config": task.config,
-        "status": "pending",
-        "created_at": datetime.utcnow()
-    }
-    tasks_db[task_id] = new_task
-    # TODO: Trigger Celery Task here
-    return new_task
+@app.on_event("startup")
+def _startup():
+    init_db()
+    logger.info("Database tables are ready")
 
-@app.get("/api/v1/tasks/{task_id}", response_model=schemas.TaskRead)
-async def get_task(task_id: uuid.UUID):
-    if task_id not in tasks_db:
-        raise HTTPException(status_code=404, detail="Task not found")
-    return tasks_db[task_id]
 
 @app.get("/api/v1/health")
-async def health_check():
-    return {"status": "healthy", "timestamp": datetime.utcnow()}
+def health_check():
+    try:
+        import scrapling
+
+        scrapling_version = getattr(scrapling, "__version__", "unknown")
+    except Exception:
+        scrapling_version = None
+    db_ok = database_ok()
+    return {
+        "status": "healthy" if db_ok else "degraded",
+        "database": db_ok,
+        "scrapling": scrapling_version,
+        "ai_configured": bool(openai_api_key()),
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+    }
+
+
+@app.get("/")
+def root():
+    return {"service": "crawler-platform", "docs": "/docs", "health": "/api/v1/health"}

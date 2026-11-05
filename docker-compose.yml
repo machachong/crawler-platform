@@ -1,4 +1,4 @@
-version: '3.8'
+version: "3.8"
 
 services:
   db:
@@ -11,11 +11,21 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d crawler_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
 
   redis:
     image: redis:7-alpine
     ports:
       - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
 
   backend:
     build: ./backend
@@ -25,25 +35,37 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - DATABASE_URL=postgresql://user:pass@db:5432/crawler_db
-      - REDIS_URL=redis://redis:6379/0
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      DATABASE_URL: postgresql://user:pass@db:5432/crawler_db
+      REDIS_URL: redis://redis:6379/0
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_API_BASE: ${OPENAI_API_BASE:-https://api.openai.com/v1}
+      AI_MODEL: ${AI_MODEL:-gpt-4o-mini}
+      AI_CHUNK_CHARS: ${AI_CHUNK_CHARS:-12000}
+      CRAWLER_USER_AGENT: ${CRAWLER_USER_AGENT:-CrawlerPlatformBot/1.0 (+https://github.com/machachong/crawler-platform; respects robots.txt)}
     depends_on:
-      - db
-      - redis
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 
   worker:
     build: ./backend
-    command: celery -A app.worker.tasks worker --loglevel=info
+    command: celery -A app.worker.tasks worker --loglevel=info --concurrency=2
     volumes:
       - ./backend:/app
     environment:
-      - DATABASE_URL=postgresql://user:pass@db:5432/crawler_db
-      - REDIS_URL=redis://redis:6379/0
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      DATABASE_URL: postgresql://user:pass@db:5432/crawler_db
+      REDIS_URL: redis://redis:6379/0
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_API_BASE: ${OPENAI_API_BASE:-https://api.openai.com/v1}
+      AI_MODEL: ${AI_MODEL:-gpt-4o-mini}
+      AI_CHUNK_CHARS: ${AI_CHUNK_CHARS:-12000}
+      CRAWLER_USER_AGENT: ${CRAWLER_USER_AGENT:-CrawlerPlatformBot/1.0 (+https://github.com/machachong/crawler-platform; respects robots.txt)}
     depends_on:
-      - db
-      - redis
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 
   frontend:
     build: ./frontend
@@ -52,7 +74,9 @@ services:
     volumes:
       - ./frontend:/app
     environment:
-      - VITE_API_BASE_URL=http://localhost:8000/api/v1
+      VITE_API_BASE_URL: http://localhost:8000/api/v1
+    depends_on:
+      - backend
 
 volumes:
   postgres_data:
