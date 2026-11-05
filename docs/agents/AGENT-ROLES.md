@@ -14,7 +14,7 @@
 ### 💻 Agent 2: 全栈开发工程师 (Dev Engineer)
 - **ID 标识**: `crawler-dev-fullstack`
 - **核心作用**: 负责项目的“双手”。根据 PRD 编写 FastAPI 后端代码（异步任务、爬虫逻辑、ORM）和 Vue3 前端代码（Vite, Tailwind）。
-- **产出成果**: 飞书云文档（技术架构图、API 设计规范）、`backend/`、`frontend/`、`docker-compose.yml`。
+- **产出成果**: 飞书云文档（技术架构图、API 设计规范）、`api/`、`web/`、`docker-compose.yml`。
 - **交付方式**: 任何代码设计与架构说明均首选飞书文档发布链接。
 
 ### 🧪 Agent 3: QA 测试与审计 (Test & Audit)
