@@ -13,9 +13,13 @@
           <span>新建抓取</span>
         </a-menu-item>
         <a-menu-item v-if="auth.user.role === 'admin'" key="3">
+          <team-outlined />
           <span>用户管理</span>
         </a-menu-item>
-        <a-menu-item key="4"><span>采集模板</span></a-menu-item>
+        <a-menu-item key="4">
+          <snippets-outlined />
+          <span>采集模板</span>
+        </a-menu-item>
       </a-menu>
     </a-layout-sider>
     <a-layout>
@@ -55,7 +59,7 @@
 <script setup>
 import { onMounted, onUnmounted, reactive, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
-import { DashboardOutlined, PlusCircleOutlined } from '@ant-design/icons-vue';
+import { DashboardOutlined, PlusCircleOutlined, TeamOutlined, SnippetsOutlined } from '@ant-design/icons-vue';
 import { message } from 'ant-design-vue';
 import api, { errorMessage } from './utils/api';
 import { auth, canWrite, clearAuth, logout, roleNames } from './utils/auth';
