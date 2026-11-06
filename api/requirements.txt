@@ -12,3 +12,4 @@ python-dotenv>=1.0
 # Do not install the ai/mcp extra here; browsers are optional, see README.
 scrapling[fetchers]>=0.5.1,<0.6
 markdownify>=1.2.0
+markdown-it-py>=3.0,<5

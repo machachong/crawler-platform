@@ -1,4 +1,5 @@
 from uuid import UUID
+import re
 
 import pytest
 
@@ -28,9 +29,9 @@ def test_preview_is_private_and_does_not_publish(client, result_task):
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/html")
     assert "<title>预览标题</title>" in response.text
-    assert "<h2>本周观察</h2>" in response.text
+    assert re.search(r'<h2 id="section-\d+">本周观察</h2>', response.text)
     assert "<strong>核心结论</strong>" in response.text
-    assert "<ul><li>第一条</li><li>第二条</li></ul>" in response.text
+    assert "<ul><li>第一条</li><li>第二条</li></ul>" in re.sub(r">\s+<", "><", response.text)
     for secret in ["private-prompt-marker", "private-error-marker", "private-log-marker",
                    "private-config-marker", "private-raw-marker"]:
         assert secret not in response.text
@@ -204,6 +205,6 @@ def test_markdown_code_blocks_keep_untrusted_markup_inert():
     from app.publishing import render_text
 
     html = render_text('## 标题\n\n1. 第一项\n2. 第二项\n\n```html\n<script>x</script>\n```')
-    assert "<h3>标题</h3>" in html
-    assert "<ol><li>第一项</li><li>第二项</li></ol>" in html
+    assert re.search(r'<h3 id="section-\d+">标题</h3>', html)
+    assert "<ol><li>第一项</li><li>第二项</li></ol>" in re.sub(r">\s+<", "><", html)
     assert "<pre><code>&lt;script&gt;x&lt;/script&gt;</code></pre>" in html

@@ -1,13 +1,16 @@
 """Render saved results as self-contained HTML. All source/model text is escaped."""
 
 import json
-import re
-from datetime import datetime
+import math
+from datetime import datetime, timedelta, timezone
 from html import escape
+from pathlib import Path
 from urllib.parse import urlsplit
 
 from fastapi import HTTPException
 from fastapi.responses import HTMLResponse
+
+from .publication_markdown import ReportMarkdown, web_url
 
 LABELS = {"title": "标题", "summary": "摘要", "key_points": "要点", "text": "正文",
           "author": "作者", "content": "内容", "name": "名称", "price": "价格"}
@@ -19,82 +22,12 @@ PAGE_HEADERS = {
     "X-Robots-Tag": "noindex, nofollow",
     "Cache-Control": "no-store",
 }
-CSS = """
-:root{color-scheme:light}*{box-sizing:border-box}body{margin:0;background:#f5f5f2;color:#202b32;
-font:16px/1.8 system-ui,-apple-system,'Segoe UI','Microsoft YaHei',sans-serif}
-main{max-width:1040px;margin:auto;padding:56px 32px 72px}header{margin-bottom:36px}
-.eyebrow{font-size:12px;letter-spacing:.16em;color:#4f7166}h1{font-size:clamp(26px,4vw,40px);
-line-height:1.35;margin:12px 0 16px;overflow-wrap:anywhere}.meta,footer{font-size:13px;color:#65716d}
-article{background:white;padding:28px 32px;margin:0 0 24px;border:1px solid #e0e5e1;border-radius:8px}
-.source{font-size:13px;margin-bottom:24px;overflow-wrap:anywhere}a{color:#176b55}
-h2,h3,h4,h5,h6{line-height:1.5;margin:24px 0 12px}h2{font-size:24px}h3{font-size:21px}h4{font-size:18px}
-p{margin:0 0 16px;white-space:pre-wrap;overflow-wrap:anywhere}li{overflow-wrap:anywhere}
-pre{padding:16px;overflow:auto;background:#f1f4f2;border-radius:4px;font-size:13px;white-space:pre-wrap;
-overflow-wrap:anywhere}code{font-family:ui-monospace,monospace}.table-wrap{overflow:auto}
-table{width:100%;border-collapse:collapse;font-size:14px}th,td{text-align:left;vertical-align:top;
-padding:12px;border:1px solid #dfe5e1;min-width:100px;max-width:400px;overflow-wrap:anywhere;white-space:pre-wrap}
-th{background:#edf2ee}.field{margin-bottom:20px}.field-label{font-size:14px;color:#4f7166;font-weight:600}
-footer{margin-top:32px}@media(max-width:600px){main{padding:28px 16px}article{padding:20px 16px}}
-"""
-
-
-def _inline(text: str) -> str:
-    text = escape(text)
-    text = re.sub(r"`([^`\n]+)`", r"<code>\1</code>", text)
-    return re.sub(r"\*\*([^*\n]+)\*\*", r"<strong>\1</strong>", text)
+CSS = Path(__file__).with_name("publication.css").read_text(encoding="utf-8")
 
 
 def render_text(text: str) -> str:
-    """Small Markdown subset; raw HTML, images and arbitrary links stay plain text."""
-    parts, paragraph, code_lines = [], [], []
-    in_code = False
-    list_tag = None
-
-    def flush():
-        if paragraph:
-            parts.append("<p>" + _inline("\n".join(paragraph)) + "</p>")
-            paragraph.clear()
-
-    def close_list():
-        nonlocal list_tag
-        if list_tag:
-            parts.append(f"</{list_tag}>")
-            list_tag = None
-
-    for line in str(text).splitlines():
-        if line.strip().startswith("```"):
-            flush()
-            close_list()
-            if in_code:
-                parts.append("<pre><code>" + escape("\n".join(code_lines)) + "</code></pre>")
-                code_lines.clear()
-            in_code = not in_code
-        elif in_code:
-            code_lines.append(line)
-        elif not line.strip():
-            flush()
-            close_list()
-        elif heading := re.match(r"^(#{1,6})\s+(.+)$", line):
-            flush()
-            close_list()
-            level = min(6, len(heading[1]) + 1)
-            parts.append(f"<h{level}>" + _inline(heading[2]) + f"</h{level}>")
-        elif item := re.match(r"^\s*([-*+]|\d+[.)])\s+(.+)$", line):
-            flush()
-            tag = "ol" if item[1][0].isdigit() else "ul"
-            if tag != list_tag:
-                close_list()
-                list_tag = tag
-                parts.append(f"<{tag}>")
-            parts.append("<li>" + _inline(item[2]) + "</li>")
-        else:
-            close_list()
-            paragraph.append(line)
-    flush()
-    close_list()
-    if code_lines:
-        parts.append("<pre><code>" + escape("\n".join(code_lines)) + "</code></pre>")
-    return "".join(parts)
+    """Markdown is parsed as content, never as executable HTML."""
+    return ReportMarkdown().render(text)
 
 
 def _scalar(value) -> str:
@@ -105,23 +38,39 @@ def _scalar(value) -> str:
     return str(value)
 
 
-def render_data(value, depth=0) -> str:
+def render_data(value, depth=0, context=None) -> str:
+    context = context if context is not None else ReportMarkdown()
     if depth >= 8:
         return "<pre>" + escape(json.dumps(value, ensure_ascii=False, indent=2)) + "</pre>"
     if isinstance(value, list):
         if value and all(isinstance(item, dict) for item in value):
+            if any(isinstance(cell, (dict, list)) or len(str(cell)) > 160
+                   for item in value for cell in item.values()):
+                return '<div class="record-grid">' + "".join(
+                    '<section class="record-card">' + render_data(item, depth + 1, context) + "</section>"
+                    for item in value
+                ) + "</div>"
             keys = list(dict.fromkeys(key for item in value for key in item))
-            head = "".join("<th>" + escape(str(key)) + "</th>" for key in keys)
+            head = "".join("<th>" + escape(LABELS.get(key, str(key))) + "</th>" for key in keys)
             rows = "".join("<tr>" + "".join("<td>" + escape(_scalar(item.get(key))) + "</td>"
                                           for key in keys) + "</tr>" for item in value)
-            return '<div class="table-wrap"><table><thead><tr>' + head + "</tr></thead><tbody>" + rows + "</tbody></table></div>"
-        return "<ul>" + "".join("<li>" + render_data(item, depth + 1) + "</li>" for item in value) + "</ul>"
+            context.characters += sum(len(_scalar(cell)) for item in value for cell in item.values())
+            return '<div class="table-wrap" role="region" tabindex="0" aria-label="数据表，可横向滚动"><table><thead><tr>' + head + "</tr></thead><tbody>" + rows + "</tbody></table></div>"
+        return "<ul>" + "".join("<li>" + render_data(item, depth + 1, context) + "</li>" for item in value) + "</ul>"
     if isinstance(value, dict):
         if set(value) == {"text"}:
-            return render_text(value["text"])
-        return "".join('<section class="field"><div class="field-label">' + escape(LABELS.get(key, key))
-                       + "</div>" + render_data(item, depth + 1) + "</section>" for key, item in value.items())
-    return render_text(_scalar(value))
+            return context.render(_scalar(value["text"]))
+        fields = []
+        for key, item in value.items():
+            label = LABELS.get(key, str(key))
+            if depth == 0:
+                section_id = context.heading(label)
+                heading = f'<h2 class="field-label" id="{section_id}">{escape(label)}</h2>'
+            else:
+                heading = '<div class="field-label">' + escape(label) + "</div>"
+            fields.append('<section class="field">' + heading + render_data(item, depth + 1, context) + "</section>")
+        return "".join(fields)
+    return context.render(_scalar(value))
 
 
 def page_title(task, title: str = "") -> str:
@@ -134,6 +83,8 @@ def page_title(task, title: str = "") -> str:
 def render_page(task, results, title: str = "") -> tuple[str, str]:
     title = page_title(task, title)
     articles = []
+    sources = set()
+    context = ReportMarkdown()
     for row in results:
         data = row.extracted_data
         if row.status != "ok" or (isinstance(data, dict) and (
@@ -151,20 +102,54 @@ def render_page(task, results, title: str = "") -> tuple[str, str]:
         if isinstance(data, dict) and set(data) == {"text"} and not str(data["text"] or "").strip():
             continue
         source = escape(row.source_url, quote=True)
-        parsed = urlsplit(row.source_url)
-        link = (f'<a href="{source}" target="_blank" rel="noopener noreferrer">{source}</a>'
-                if parsed.scheme in {"http", "https"} and parsed.hostname else source)
-        articles.append(f'<article><div class="source">来源：{link}</div>{render_data(data)}</article>')
+        safe_source = web_url(row.source_url)
+        domain = urlsplit(row.source_url).hostname if safe_source else "来源页面"
+        link = (f'<a href="{source}" target="_blank" rel="noopener noreferrer">{escape(domain)}</a>'
+                if safe_source else escape(row.source_url))
+        sources.add(row.source_url)
+        article_id = f"source-{len(articles) + 1}"
+        context.headings.append((article_id, domain, 2))
+        articles.append(
+            f'<article class="report-article" id="{article_id}"><div class="source">'
+            '<div class="source-origin"><span class="source-dot" aria-hidden="true"></span>'
+            f'原文来源 · {link}</div><span class="source-index">SOURCE {len(articles) + 1:02d}</span>'
+            '</div><div class="prose">' + render_data(data, context=context) + "</div></article>"
+        )
     if not articles:
         raise HTTPException(422, "没有可发布的正文或提取结果，请先完成抓取")
-    generated = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    generated = datetime.now(timezone(timedelta(hours=8)))
+    minutes = max(1, math.ceil(context.characters / 500))
+    sections = [(key, label, level) for key, label, level in context.headings
+                if level <= 3 and (len(articles) > 1 or not key.startswith("source-"))]
+    if not sections:
+        sections = [("source-1", "正文内容", 2)]
+    toc_items = "".join(
+        f'<li class="{"toc-first" if index == 0 else "toc-child" if level > 2 else ""}">'
+        f'<a href="#{key}">{escape(label)}</a></li>'
+        for index, (key, label, level) in enumerate(sections)
+    )
+    toc = '<ul class="toc-list">' + toc_items + "</ul>"
     html = ('<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">'
             '<meta name="viewport" content="width=device-width, initial-scale=1">'
             '<meta name="referrer" content="no-referrer"><meta name="robots" content="noindex,nofollow">'
-            f'<title>{escape(title)}</title><style>{CSS}</style></head><body><main><header>'
-            f'<div class="eyebrow">网页采集报告</div><h1>{escape(title)}</h1>'
-            f'<div class="meta">{len(articles)} 个来源 · 生成于 {generated}</div></header>'
-            + "".join(articles) + '<footer>内容来自以上来源页面，请核对原文。</footer></main></body></html>')
+            f'<title>{escape(title)}</title><style>{CSS}</style></head><body>'
+            '<a class="skip-link" href="#reading">跳到正文</a><div class="shell">'
+            '<div class="masthead"><div class="brand"><span class="brand-mark" aria-hidden="true">阅</span>'
+            '采集简报</div><span class="masthead-note">公开阅读 · CONTENT BRIEF</span></div>'
+            '<header class="hero"><div><div class="eyebrow">网页采集报告 / THE READING EDITION</div>'
+            f'<h1>{escape(title)}</h1><p class="hero-description">信息有出处，阅读有条理。以下内容整理自采集到的来源页面。</p>'
+            f'<div class="hero-meta"><span>{len(sources)} 个来源</span><span>约 {minutes} 分钟阅读</span>'
+            f'<span>生成于 <time datetime="{generated.isoformat(timespec="minutes")}">'
+            + generated.strftime("%Y.%m.%d %H:%M") + ' (UTC+08:00)</time></span></div></div>'
+            '<div class="edition" aria-hidden="true"><div class="edition-label">READING NOTES</div>'
+            f'<div class="edition-date">{generated:%m / %d}</div><div class="edition-year">{generated:%Y}</div></div></header>'
+            '<div class="reading-layout"><aside class="sidebar"><div class="toc-label">ON THIS PAGE</div>'
+            '<div class="toc-title">本页目录</div><nav aria-label="本页目录">' + toc + '</nav>'
+            '<p class="sidebar-note">保留信息的原貌，<br>也让它更好读。</p></aside><main class="document" id="reading">'
+            '<details class="mobile-toc"><summary>本页目录 · 展开查看</summary><nav aria-label="移动端目录">' + toc + '</nav></details>'
+            + "".join(articles) + '<div class="document-end" aria-label="正文结束">END OF BRIEF</div></main></div>'
+            '<footer class="footer"><p>内容来自以上来源页面，请核对原文。</p>'
+            '<p>采集简报 · 网页内容整理与分享 <a href="#reading">回到正文 ↑</a></p></footer></div></body></html>')
     return title, html
 
 
