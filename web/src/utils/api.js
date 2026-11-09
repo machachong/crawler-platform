@@ -21,6 +21,7 @@ api.interceptors.response.use((response) => response, (error) => {
 
 export function errorMessage(error) {
   let data = error?.response?.data;
+  if (data instanceof ArrayBuffer) data = new TextDecoder('utf-8').decode(data);
   if (typeof data === 'string') {
     try { data = JSON.parse(data); } catch { /* Use the network error below. */ }
   }

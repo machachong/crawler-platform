@@ -1,6 +1,6 @@
 <template>
-  <a-card title="网页发布" style="margin-bottom: 16px">
-    <p class="hint">将当前结果排版为独立 HTML 网页。发布后，任何持有链接的人都可以免登录访问。</p>
+  <a-card class="publication-card" title="网页预览与发布">
+    <p class="hint">先预览当前结果，再生成可以分享的网页链接。</p>
     <a-alert v-if="error" type="error" :message="error" show-icon style="margin-bottom: 12px" />
     <a-space wrap style="margin-bottom: 12px">
       <a-input v-model:value="title" :maxlength="120" aria-label="网页标题" placeholder="网页标题" style="width: min(320px, 65vw)" />
@@ -22,7 +22,8 @@
         <a :href="publication.url" target="_blank" rel="noopener noreferrer">打开网页</a>
       </div>
     </div>
-    <a-modal v-model:open="previewOpen" title="网页预览（尚未发布）" :footer="null" :width="1000" destroy-on-close>
+    <a-modal v-model:open="previewOpen" title="当前结果 · 网页预览" :footer="null"
+      :width="'min(1120px, calc(100vw - 24px))'" destroy-on-close @after-close="previewHtml = ''">
       <iframe :srcdoc="previewHtml" title="生成内容的网页预览" sandbox="allow-popups allow-popups-to-escape-sandbox" class="preview-frame" />
     </a-modal>
   </a-card>
@@ -60,8 +61,19 @@ async function preview() {
   previewing.value = true; error.value = '';
   const id = props.task.id;
   try {
-    const { data } = await api.get(`/tasks/${id}/preview`, { params: { title: title.value.trim() }, responseType: 'text' });
-    if (props.task.id === id) { previewHtml.value = data; previewOpen.value = true; }
+    const { data, headers } = await api.get(`/tasks/${id}/preview`, {
+      params: { title: title.value.trim() }, responseType: 'arraybuffer',
+    });
+    if (!headers['content-type']?.toLowerCase().startsWith('text/html')) {
+      throw new Error('预览接口返回了非网页内容，请刷新后重试。');
+    }
+    let html;
+    try {
+      html = new TextDecoder('utf-8', { fatal: true }).decode(data);
+    } catch {
+      throw new Error('预览返回的网页编码异常，请检查服务端或反向代理的 UTF-8 配置。');
+    }
+    if (props.task.id === id) { previewHtml.value = html; previewOpen.value = true; }
   } catch (cause) { if (props.task.id === id) error.value = errorMessage(cause); }
   finally { previewing.value = false; }
 }
@@ -96,9 +108,10 @@ async function copyLink() {
 
 <style scoped>
 .hint { color: #667085; margin: 0 0 12px; font-size: 13px; }
+.publication-card { margin-bottom: 16px; border-color: #dae3f5; background: #f9fbff; }
 .published { margin-top: 8px; }
 .published > .hint { margin-top: 8px; }
 .link-row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
 .public-link { flex: 1; min-width: 200px; border: 1px solid #d9d9d9; border-radius: 6px; padding: 6px 10px; color: #176b55; background: #fafafa; }
-.preview-frame { width: 100%; height: 65vh; border: 1px solid #e4e7ec; }
+.preview-frame { display: block; width: 100%; height: 70dvh; border: 1px solid #e4e7ec; border-radius: 10px; background: #f8fafc; }
 </style>

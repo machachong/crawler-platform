@@ -13,6 +13,8 @@ import logging
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
+from w3lib.encoding import html_to_unicode
+
 from ..config import CRAWLER_USER_AGENT
 from .dedupe import UrlDedupe
 from .links import dedupe_key, normalize_url, plan_next_links
@@ -85,6 +87,26 @@ def page_markdown(page) -> str:
     return _clean_text(str(text or ""))
 
 
+def _decode_http_page(page):
+    """Reparse the original bytes when the HTTP parser missed a charset declaration."""
+    from scrapling.engines.toolbelt.custom import Response
+
+    content_type = page.headers.get("content-type", "")
+    encoding, text = html_to_unicode(content_type, page.body, url=str(page.url))
+    if "\ufffd" in text and content_type:
+        # An incorrect HTTP charset can mask a valid declaration in the document.
+        fallback_encoding, fallback = html_to_unicode(None, page.body, url=str(page.url))
+        if fallback.count("\ufffd") < text.count("\ufffd"):
+            encoding, text = fallback_encoding, fallback
+    if encoding.lower() == page.encoding.lower() and "\ufffd" not in text:
+        return page
+    return Response(
+        url=str(page.url), content=text, status=page.status, reason=page.reason,
+        cookies=page.cookies, headers=page.headers, request_headers=page.request_headers,
+        encoding="utf-8", _log=False,
+    )
+
+
 def _clean_text(text: str) -> str:
     lines = [line.rstrip() for line in text.replace("\r\n", "\n").split("\n")]
     compact: list[str] = []
@@ -130,7 +152,7 @@ def fetch_and_clean_sync(url: str) -> str | None:
     status = int(getattr(page, "status", 0) or 0)
     if status >= 400:
         return None
-    text = page_markdown(page)
+    text = page_markdown(_decode_http_page(page))
     return text or None
 
 
@@ -202,6 +224,7 @@ class TaskCrawlSpider:
                 depth = int((response.meta or {}).get("depth") or 0)
                 status = int(response.status or 0)
                 url = str(response.url)
+                parsed_page = response
                 if status >= 400:
                     yield {
                         "url": url,
@@ -211,11 +234,13 @@ class TaskCrawlSpider:
                         "error": f"HTTP {status}",
                     }
                 else:
+                    if self.job.engine == "http":
+                        parsed_page = _decode_http_page(response)
                     yield {
                         "url": url,
                         "depth": depth,
                         "status_code": status,
-                        "markdown": page_markdown(response),
+                        "markdown": page_markdown(parsed_page),
                         "error": None,
                     }
                 if self.should_stop() or status >= 400:
@@ -223,7 +248,7 @@ class TaskCrawlSpider:
                         self._pause()
                     return
                 links = plan_next_links(
-                    hrefs_of(response),
+                    hrefs_of(parsed_page),
                     url,
                     self.job.root_url,
                     depth,

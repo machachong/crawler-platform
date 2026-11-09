@@ -10,6 +10,7 @@ from app.models import CrawlResult, ScheduleEvent, Task, TaskRun, TaskSchedule, 
 from app.runs import latest_run
 from app.scheduling import dispatch_due, slot
 from app.worker.tasks import execute_task
+from conftest import login_request
 
 
 @pytest.fixture()
@@ -306,7 +307,7 @@ def test_task_center_filters_pagination_and_owner_scope(client, account_factory)
     assert len(client.get("/api/v1/task-center", params={"q": "price", "offset": 12}).json()["items"]) == 3
     assert client.get("/api/v1/task-center", params={"q": "catalog"}).json()["total"] == 15
     assert client.get("/api/v1/task-center", params={"domain": "example.com"}).json()["total"] == 15
-    token = client.post("/api/v1/auth/login", json={"username": "other", "password": "test-password-123"}).json()["access_token"]
+    token = login_request(client, "other", "test-password-123").json()["access_token"]
     scoped = client.get("/api/v1/task-center", headers={"Authorization": "Bearer " + token}).json()
     assert scoped["total"] == 1 and scoped["scope"] == "own"
 
@@ -322,7 +323,7 @@ def test_templates_are_private_and_versioned(client, account_factory):
     with SessionLocal() as db:
         assert db.query(TemplateVersion).filter(TemplateVersion.template_id == UUID(first["id"])).count() == 2
     account_factory("other", "member")
-    token = client.post("/api/v1/auth/login", json={"username": "other", "password": "test-password-123"}).json()["access_token"]
+    token = login_request(client, "other", "test-password-123").json()["access_token"]
     headers = {"Authorization": "Bearer " + token}
     assert first["id"] not in [row["id"] for row in client.get("/api/v1/templates", headers=headers).json()]
     assert client.post("/api/v1/tasks", headers=headers, json={"target_url": "https://example.com", "config": {"template_id": first["id"]}}).status_code == 404
@@ -333,7 +334,7 @@ def test_templates_are_private_and_versioned(client, account_factory):
 def test_new_endpoints_keep_task_permission_boundaries(client, account_factory, role):
     task = create(client)
     account_factory("other", role)
-    token = client.post("/api/v1/auth/login", json={"username": "other", "password": "test-password-123"}).json()["access_token"]
+    token = login_request(client, "other", "test-password-123").json()["access_token"]
     headers = {"Authorization": "Bearer " + token}
     base = f"/api/v1/tasks/{task['id']}"
     assert client.get(base + "/runs", headers=headers).status_code == 404

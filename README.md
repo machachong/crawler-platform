@@ -26,7 +26,7 @@
 
 ## 登录与权限
 
-平台采用账号密码登录，不提供公开注册或默认密码。首次启动后，在仓库根目录创建管理员：
+平台支持账号密码登录和注册。两种操作均需要输入图片验证码，验证码 3 分钟过期，每张只能提交一次。注册会创建待启用的普通成员账号，管理员可在「用户管理」启用。首次启动后，在仓库根目录创建管理员：
 
 ```powershell
 # 本地：使用已有 .env 中的 DATABASE_URL；密码交互输入，不会显示在终端
@@ -108,17 +108,19 @@ Postgres 数据在卷 `postgres_data`。首次启动会 `create_all` 建表；�
 docker compose exec api python scripts/smoke_test.py
 ```
 
-脚本先交互输入已创建的账号密码，再创建单页任务并轮询；也支持 `SMOKE_USERNAME`、`SMOKE_PASSWORD` 环境变量供受控测试环境使用。配了 AI 密钥时期望 `completed`；没配密钥时期望 `failed`，且结果里仍有清洗后的正文，错误含 `OPENAI_API_KEY`。
+脚本先输入已创建的账号密码，再按提示打开临时验证码图片并输入字符，然后创建单页任务并轮询。账号和密码也可由 `SMOKE_USERNAME`、`SMOKE_PASSWORD` 环境变量提供。配了 AI 密钥时期望 `completed`；没配密钥时期望 `failed`，且结果里仍有清洗后的正文，错误含 `OPENAI_API_KEY`。
 
 也可以用 curl：
 
 ```bash
 curl -s http://localhost:8000/api/v1/health
 
-# 登录接口返回 access_token。使用你自己的账号密码，不要把密码写入共享脚本。
+# 获取验证码图片和 captcha_id。image 是 PNG 的 data URL。
+curl -s http://localhost:8000/api/v1/auth/captcha
+# 读取图片后提交验证码。登录接口返回 access_token。
 curl -s -X POST http://localhost:8000/api/v1/auth/login \
   -H 'Content-Type: application/json' \
-  -d '{"username":"<账号>","password":"<密码>"}'
+  -d '{"username":"<账号>","password":"<密码>","captcha_id":"<验证码 ID>","captcha_code":"<图片中的字符>"}'
 
 # 后续请求都带上返回的 access_token：
 curl -s -X POST http://localhost:8000/api/v1/tasks \

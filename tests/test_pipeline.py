@@ -32,17 +32,25 @@ PAGES = {
     "/private": "<html><body><main><p>secret</p></main></body></html>",
 }
 
+LEGACY_PAGES = {
+    "/gbk": ('<meta charset="gbk"><main><p>中文采集内容与预览</p></main>', "gbk", "text/html"),
+    "/wrong-charset": ('<meta charset="gb18030"><main><p>中文采集内容与预览</p></main>',
+                      "gb18030", "text/html; charset=utf-8"),
+    "/big5": ("<main><p>繁體中文採集內容與預覽</p></main>", "big5", "text/html; charset=big5"),
+}
+
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = self.path.split("?", 1)[0]
-        body = PAGES.get(path)
+        body, encoding, content_type = LEGACY_PAGES.get(path, (
+            PAGES.get(path), "utf-8", "text/plain" if path == "/robots.txt" else "text/html; charset=utf-8",
+        ))
         if body is None:
             self.send_response(404)
             self.end_headers()
             return
-        data = body.encode("utf-8")
-        content_type = "text/plain" if path == "/robots.txt" else "text/html; charset=utf-8"
+        data = body.encode(encoding)
         self.send_response(200)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
@@ -62,6 +70,27 @@ def site():
         yield f"http://127.0.0.1:{server.server_address[1]}"
     finally:
         server.shutdown()
+
+
+@pytest.mark.parametrize(("path", "expected"), [
+    ("/gbk", "中文采集内容与预览"),
+    ("/wrong-charset", "中文采集内容与预览"),
+    ("/big5", "繁體中文採集內容與預覽"),
+])
+def test_legacy_page_charsets_survive_crawl_and_html_preview(client, site, path, expected):
+    created = client.post("/api/v1/tasks", json={
+        "target_url": site + path,
+        "config": {"respect_robots": False, "download_delay": 0},
+    })
+    assert created.status_code == 200, created.text
+    task_id = created.json()["id"]
+    assert execute_task(task_id)["status"] == "completed"
+    task_path = f"/api/v1/tasks/{task_id}"
+    assert expected in client.get(task_path).json()["results"][0]["raw_text"]
+    preview = client.get(task_path + "/preview")
+    assert preview.status_code == 200
+    assert "charset=utf-8" in preview.headers["content-type"]
+    assert expected in preview.content.decode("utf-8", errors="strict")
 
 
 def test_site_mode_bfs_robots_and_ai(client, site, monkeypatch):

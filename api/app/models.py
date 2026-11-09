@@ -141,6 +141,15 @@ class LoginThrottle(Base):
     expires_at = Column(DateTime, nullable=False, index=True)
 
 
+class CaptchaChallenge(Base):
+    __tablename__ = "captcha_challenges"
+
+    id = Column(String(32), primary_key=True)
+    purpose = Column(String(16), nullable=False)
+    answer_hash = Column(String(64), nullable=False)
+    expires_at = Column(DateTime, nullable=False, index=True)
+
+
 class PublishedPage(Base):
     __tablename__ = "published_pages"
 

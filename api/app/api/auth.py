@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session, aliased
 from ..auth import (
     DUMMY_HASH, get_current_user, hash_password, require_admin, token_digest, verify_password,
 )
+from ..captcha import consume_challenge, issue_challenge
 from ..config import AUTH_SESSION_HOURS
 from ..database import get_db
 from ..models import AuthSession, LoginThrottle, User
@@ -20,6 +21,7 @@ from ..schemas import APIModel
 
 router = APIRouter(prefix="/api/v1", tags=["accounts"])
 Role = Literal["admin", "member", "viewer"]
+CaptchaPurpose = Literal["login", "register"]
 
 
 class Credentials(BaseModel):
@@ -36,6 +38,16 @@ class Credentials(BaseModel):
 class UserCreate(Credentials):
     password: str = Field(min_length=12, max_length=128, repr=False)
     role: Role = "member"
+
+
+class ChallengeCredentials(Credentials):
+    captcha_id: str = Field(pattern=r"^[a-f0-9]{32}$")
+    captcha_code: str = Field(pattern=r"^[a-zA-Z0-9]{5}$", repr=False)
+
+
+class Registration(ChallengeCredentials):
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+    password: str = Field(min_length=12, max_length=128, repr=False)
 
 
 class UserRead(APIModel):
@@ -66,7 +78,7 @@ class UserUpdate(BaseModel):
     password: str | None = Field(None, min_length=12, max_length=128, repr=False)
 
 
-def _reserve_attempt(db: Session, key: str, limit: int) -> None:
+def _reserve_attempt(db: Session, key: str, limit: int, message: str = "登录尝试过多，请稍后再试") -> None:
     """Atomic per-bucket counters shared by API processes, including unknown users."""
     now = datetime.utcnow()
     db.query(LoginThrottle).filter(LoginThrottle.expires_at <= now).delete()
@@ -80,18 +92,50 @@ def _reserve_attempt(db: Session, key: str, limit: int) -> None:
             db.flush()
         except IntegrityError:
             db.rollback()
-            return _reserve_attempt(db, key, limit)
+            return _reserve_attempt(db, key, limit, message)
     bucket = db.get(LoginThrottle, digest)
     attempts, expires_at = bucket.attempts, bucket.expires_at
     db.commit()
     if attempts > limit:
         wait = max(1, int((expires_at - now).total_seconds()))
-        raise HTTPException(429, "登录尝试过多，请稍后再试", headers={"Retry-After": str(wait)})
+        raise HTTPException(429, message, headers={"Retry-After": str(wait)})
+
+
+def _client_address(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
+
+
+@router.get("/auth/captcha")
+def captcha(request: Request, response: Response, purpose: CaptchaPurpose = "login",
+            db: Session = Depends(get_db)):
+    _reserve_attempt(db, f"captcha:{_client_address(request)}", 180, "验证码请求过多，请稍后再试")
+    response.headers["Cache-Control"] = "no-store"
+    return issue_challenge(db, purpose)
+
+
+def _save_user(db: Session, user: User) -> User:
+    db.add(user)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409, "账号已存在")
+    db.refresh(user)
+    return user
+
+
+@router.post("/auth/register", response_model=UserRead, status_code=201)
+def register(payload: Registration, request: Request, db: Session = Depends(get_db)):
+    _reserve_attempt(db, f"register:{_client_address(request)}", 10, "注册尝试过多，请稍后再试")
+    consume_challenge(db, payload.captcha_id, payload.captcha_code, "register")
+    return _save_user(db, User(username=payload.username, password_hash=hash_password(payload.password),
+                               role="member", is_active=False))
 
 
 @router.post("/auth/login", response_model=LoginRead)
-def login(payload: Credentials, request: Request, response: Response, db: Session = Depends(get_db)):
-    _reserve_attempt(db, f"ip:{request.client.host if request.client else 'unknown'}", 60)
+def login(payload: ChallengeCredentials, request: Request, response: Response, db: Session = Depends(get_db)):
+    _reserve_attempt(db, f"ip:{_client_address(request)}", 60)
+    consume_challenge(db, payload.captcha_id, payload.captcha_code, "login")
     _reserve_attempt(db, f"account:{payload.username}", 10)
     user = db.query(User).filter(User.username == payload.username).with_for_update().first()
     valid = verify_password(payload.password, user.password_hash if user else DUMMY_HASH)
@@ -140,15 +184,8 @@ def list_users(limit: int = Query(100, ge=1, le=200), offset: int = Query(0, ge=
 
 @router.post("/users", response_model=UserRead, status_code=201)
 def create_user(payload: UserCreate, admin: User = Depends(require_admin), db: Session = Depends(get_db)):
-    user = User(username=payload.username, password_hash=hash_password(payload.password), role=payload.role)
-    db.add(user)
-    try:
-        db.commit()
-    except IntegrityError:
-        db.rollback()
-        raise HTTPException(409, "账号已存在")
-    db.refresh(user)
-    return user
+    return _save_user(db, User(username=payload.username, password_hash=hash_password(payload.password),
+                               role=payload.role))
 
 
 @router.patch("/users/{user_id}", response_model=UserRead)

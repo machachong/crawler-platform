@@ -2,9 +2,11 @@ from datetime import datetime, timedelta
 
 import pytest
 
+from conftest import captcha_payload, login_request
+
 
 def sign_in(client, username="admin", password="test-password-123"):
-    response = client.post("/api/v1/auth/login", json={"username": username, "password": password})
+    response = login_request(client, username, password)
     assert response.status_code == 200, response.text
     return {"Authorization": "Bearer " + response.json()["access_token"]}
 
@@ -37,11 +39,11 @@ def test_login_errors_and_no_password_echo(anonymous_client, account_factory):
     account_factory()
     account_factory("disabled", is_active=False)
     for username in ["admin", "unknown", "disabled"]:
-        response = anonymous_client.post("/api/v1/auth/login", json={"username": username, "password": "wrong"})
+        response = login_request(anonymous_client, username, "wrong")
         assert response.status_code == 401
         assert response.json()["detail"] == "账号或密码错误"
     secret = "p" * 129
-    response = anonymous_client.post("/api/v1/auth/login", json={"username": "admin", "password": secret})
+    response = login_request(anonymous_client, "admin", secret)
     assert response.status_code == 422
     assert secret not in response.text
 
@@ -178,7 +180,7 @@ def test_password_change_revokes_all_sessions(anonymous_client, account_factory)
     }).status_code == 204
     for headers in [first, second]:
         assert anonymous_client.get("/api/v1/auth/me", headers=headers).status_code == 401
-    assert anonymous_client.post("/api/v1/auth/login", json={"username": "admin", "password": "test-password-123"}).status_code == 401
+    assert login_request(anonymous_client, "admin", "test-password-123").status_code == 401
     assert sign_in(anonymous_client, password="new-password-456")
 
 
@@ -199,14 +201,63 @@ def test_login_throttle_shared_across_clients(anonymous_client):
     from app.models import LoginThrottle
 
     for _ in range(10):
-        assert anonymous_client.post("/api/v1/auth/login", json={"username": "unknown", "password": "wrong"}).status_code == 401
-    response = anonymous_client.post("/api/v1/auth/login", json={"username": "unknown", "password": "wrong"})
+        assert login_request(anonymous_client, "unknown", "wrong").status_code == 401
+    response = login_request(anonymous_client, "unknown", "wrong")
     assert response.status_code == 429
     assert int(response.headers["Retry-After"]) > 0
     with SessionLocal() as db:
         db.query(LoginThrottle).update({LoginThrottle.expires_at: datetime.utcnow() - timedelta(seconds=1)})
         db.commit()
-    assert anonymous_client.post("/api/v1/auth/login", json={"username": "unknown", "password": "wrong"}).status_code == 401
+    assert login_request(anonymous_client, "unknown", "wrong").status_code == 401
+
+
+def test_login_captcha_is_an_image_and_is_single_use(anonymous_client, account_factory):
+    account_factory()
+    credentials = {"username": "admin", "password": "test-password-123"}
+    assert anonymous_client.post("/api/v1/auth/login", json=credentials).status_code == 422
+    challenge = anonymous_client.get("/api/v1/auth/captcha")
+    assert challenge.headers["cache-control"] == "no-store"
+    assert challenge.json()["image"].startswith("data:image/png;base64,iVBOR")
+    assert "captcha_code" not in challenge.json()
+    credentials["captcha_id"] = challenge.json()["captcha_id"]
+    assert anonymous_client.post("/api/v1/auth/login", json={**credentials, "captcha_code": "AAAAA"}).status_code == 400
+    assert anonymous_client.post("/api/v1/auth/login", json={**credentials, "captcha_code": "R7K5M"}).status_code == 400
+    assert login_request(anonymous_client, "admin", "test-password-123").status_code == 200
+
+
+def test_registration_uses_its_own_captcha_and_requires_admin_activation(client):
+    credentials = {"username": "New-Account", "password": "test-password-123"}
+    path = "/api/v1/auth/register"
+    assert client.post(path, json=credentials).status_code == 422
+    assert client.post(path, json={**credentials, **captcha_payload(client)}).status_code == 400
+    challenge = captcha_payload(client, "register")
+    assert client.post(path, json={**credentials, **challenge, "role": "admin"}).status_code == 422
+    response = client.post(path, json={**credentials, **challenge})
+    assert response.status_code == 201
+    user = response.json()
+    assert user["username"] == "new-account" and user["role"] == "member"
+    assert user["is_active"] is False and "password_hash" not in user
+    assert client.post(path, json={**credentials, **challenge}).status_code == 400
+    assert client.post(path, json={**credentials, **captcha_payload(client, "register")}).status_code == 409
+    assert login_request(client, "new-account", "test-password-123").status_code == 401
+    assert client.patch(f"/api/v1/users/{user['id']}", json={"is_active": True}).status_code == 200
+    member = sign_in(client, "new-account")
+    assert client.get("/api/v1/users", headers=member).status_code == 403
+
+
+def test_expired_captcha_cannot_log_in(anonymous_client, account_factory):
+    from app.database import SessionLocal
+    from app.models import CaptchaChallenge
+
+    account_factory()
+    payload = captcha_payload(anonymous_client)
+    with SessionLocal() as db:
+        db.query(CaptchaChallenge).update({CaptchaChallenge.expires_at: datetime.utcnow() - timedelta(seconds=1)})
+        db.commit()
+    response = anonymous_client.post("/api/v1/auth/login", json={
+        "username": "admin", "password": "test-password-123", **payload,
+    })
+    assert response.status_code == 400
 
 
 def test_cors_allows_only_configured_origins(anonymous_client):

@@ -157,9 +157,9 @@ async function download(format) {
   try {
     const response = await api.get(`/tasks/${route.params.id}/export`, {
       params: { format, ...(selectedRun.value ? { run_id: selectedRun.value } : {}) },
-      responseType: 'blob',
+      responseType: 'arraybuffer',
     });
-    const blob = new Blob([response.data]);
+    const blob = new Blob([response.data], { type: response.headers['content-type'] });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;

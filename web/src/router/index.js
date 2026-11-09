@@ -4,7 +4,8 @@ import { message } from 'ant-design-vue';
 
 const routes = [
   { path: '/', component: () => import('../views/Dashboard.vue') },
-  { path: '/login', component: () => import('../views/Login.vue'), meta: { public: true } },
+  { path: '/login', name: 'login', component: () => import('../views/Login.vue'), meta: { public: true } },
+  { path: '/register', name: 'register', component: () => import('../views/Login.vue'), meta: { public: true } },
   { path: '/create', component: () => import('../views/TaskCreator.vue'), meta: { roles: ['admin', 'member'] } },
   { path: '/results/:id', component: () => import('../views/ResultViewer.vue') },
   { path: '/users', component: () => import('../views/Users.vue'), meta: { roles: ['admin'] } },

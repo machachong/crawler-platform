@@ -5,6 +5,7 @@ import pytest
 
 from app.database import SessionLocal
 from app.models import CrawlResult, PublishedPage, Task
+from conftest import login_request
 
 
 @pytest.fixture()
@@ -170,7 +171,7 @@ def test_raw_fallback_table_render_and_skipped_results(client, result_task):
 @pytest.mark.parametrize("role,expected", [("member", 404), ("viewer", 403)])
 def test_publication_permissions(client, result_task, account_factory, role, expected):
     user = account_factory("other", role)
-    response = client.post("/api/v1/auth/login", json={"username": "other", "password": "test-password-123"})
+    response = login_request(client, "other", "test-password-123")
     headers = {"Authorization": "Bearer " + response.json()["access_token"]}
     path = f"/api/v1/tasks/{result_task}"
     assert client.get(path + "/preview", headers=headers).status_code == 404

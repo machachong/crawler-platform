@@ -28,8 +28,8 @@ export async function loadUser() {
   }
 }
 
-export async function login(username, password) {
-  const { data } = await api.post('/auth/login', { username, password });
+export async function login(credentials) {
+  const { data } = await api.post('/auth/login', credentials);
   sessionStorage.setItem('crawler_access_token', data.access_token);
   auth.user = data.user;
 }

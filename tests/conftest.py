@@ -25,12 +25,14 @@ def _close_database_at_exit():
 
 @pytest.fixture(autouse=True)
 def _clean_database(monkeypatch):
+    from app import captcha
     from app.database import SessionLocal, init_db
     from app.models import Base
 
     # CRUD tests exercise queue dispatch separately from the worker pipeline.
     # Pipeline tests call execute_task explicitly against their local HTTP fixture.
     monkeypatch.setattr("app.api.tasks.enqueue", lambda *_: None)
+    monkeypatch.setattr(captcha, "new_code", lambda: "R7K5M")
 
     init_db()
     db = SessionLocal()
@@ -78,7 +80,19 @@ def account_factory(password_hash):
 @pytest.fixture()
 def client(anonymous_client, account_factory):
     account_factory()
-    response = anonymous_client.post("/api/v1/auth/login", json={"username": "admin", "password": "test-password-123"})
+    response = login_request(anonymous_client, "admin", "test-password-123")
     assert response.status_code == 200
     anonymous_client.headers["Authorization"] = "Bearer " + response.json()["access_token"]
     return anonymous_client
+
+
+def captcha_payload(client, purpose="login"):
+    response = client.get("/api/v1/auth/captcha", params={"purpose": purpose})
+    assert response.status_code == 200, response.text
+    return {"captcha_id": response.json()["captcha_id"], "captcha_code": "R7K5M"}
+
+
+def login_request(client, username, password):
+    return client.post("/api/v1/auth/login", json={
+        "username": username, "password": password, **captcha_payload(client),
+    })

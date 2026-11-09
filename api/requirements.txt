@@ -13,3 +13,5 @@ python-dotenv>=1.0
 scrapling[fetchers]>=0.5.1,<0.6
 markdownify>=1.2.0
 markdown-it-py>=3.0,<5
+w3lib>=2.6,<3
+Pillow>=10.1

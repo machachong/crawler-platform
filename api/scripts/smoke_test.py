@@ -9,11 +9,14 @@ Environment:
 
 from __future__ import annotations
 
+import base64
 import json
 import getpass
 import os
 import sys
+import tempfile
 import time
+from pathlib import Path
 
 import httpx
 
@@ -33,7 +36,16 @@ def main() -> int:
 
         username = os.getenv("SMOKE_USERNAME") or input("Username: ")
         password = os.getenv("SMOKE_PASSWORD") or getpass.getpass("Password: ")
-        signed_in = client.post(f"{API_BASE}/auth/login", json={"username": username, "password": password})
+        challenge = client.get(f"{API_BASE}/auth/captcha")
+        challenge.raise_for_status()
+        captcha = challenge.json()
+        with tempfile.TemporaryDirectory(prefix="crawler-smoke-") as folder:
+            image = Path(folder) / "captcha.png"
+            image.write_bytes(base64.b64decode(captcha["image"].split(",", 1)[1], validate=True))
+            code = input(f"Open {image} and enter its 5 characters: ").strip()
+        signed_in = client.post(f"{API_BASE}/auth/login", json={
+            "username": username, "password": password, "captcha_id": captcha["captcha_id"], "captcha_code": code,
+        })
         signed_in.raise_for_status()
         client.headers["Authorization"] = "Bearer " + signed_in.json()["access_token"]
 
