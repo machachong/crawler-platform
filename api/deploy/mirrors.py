@@ -127,7 +127,7 @@ def parse_env_file(path: Path) -> dict[str, str]:
 
 def shell_exports(path: Path) -> str:
     values = parse_env_file(path)
-    return "\n".join(f"{key}={shlex.quote(value)}" for key, value in values.items())
+    return "\n".join(f"export {key}={shlex.quote(value)}" for key, value in values.items())
 
 
 def pip_command(index_url: str = "") -> list[str]:

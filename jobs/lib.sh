@@ -231,6 +231,10 @@ preflight() {
   ver=$(docker compose version --short 2>/dev/null || docker compose version 2>/dev/null || true)
   py checks.py compose-version --text "$ver"
   load_mirrors
+  say "APT_MIRROR: ${APT_MIRROR:-未设置，使用 deb.debian.org}"
+  say "APT_SECURITY_MIRROR: ${APT_SECURITY_MIRROR:-未设置，使用 deb.debian.org}"
+  say "PIP_INDEX_URL: ${PIP_INDEX_URL:-未设置，使用 pypi.org}"
+  say "NPM_REGISTRY: ${NPM_REGISTRY:-未设置，使用 registry.npmjs.org}"
   py checks.py disk --min-mb "$MIN_FREE_MB" --path "$ROOT" --path /var/lib/docker --path /var/www/zhengaihe
   INSPECT_FILE=$(mktemp)
   chmod 600 "$INSPECT_FILE"

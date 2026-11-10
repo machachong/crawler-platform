@@ -6,6 +6,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import subprocess
 import tarfile
 import tempfile
 from pathlib import Path
@@ -302,6 +303,14 @@ def test_mirrors_and_dockerfile() -> None:
     exported = mirrors.shell_exports(env)
     if "sk-" in exported or "OPENAI" in exported:
         fail("shell export leaked a secret")
+    if not exported.startswith("export APT_MIRROR="):
+        fail("apt mirror is not exported to the compose build")
+    child = subprocess.check_output(
+        ["bash", "-c", 'eval "$1"; printf %s "$APT_MIRROR"', "bash", exported],
+        text=True,
+    )
+    if child != "https://mirrors.aliyun.com/debian":
+        fail("child process did not receive APT_MIRROR")
     for npm_url in ("https://registry.npmmirror.com", "https://registry.npmmirror.com/"):
         env.write_text(f"NPM_REGISTRY={npm_url}\n", encoding="utf-8")
         if mirrors.parse_env_file(env)["NPM_REGISTRY"] != "https://registry.npmmirror.com":
