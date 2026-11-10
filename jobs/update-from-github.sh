@@ -30,7 +30,6 @@ while [[ $# -gt 0 ]]; do
 done
 
 require_cmd git
-require_cmd python3
 require_cmd timeout
 require_cmd flock
 require_cmd docker

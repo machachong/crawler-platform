@@ -21,6 +21,25 @@ fi
 
 python3 jobs/tests/test_guards.py
 
+PY_STUB=$(mktemp -d)
+cat > "$PY_STUB/python3" <<'EOF'
+#!/bin/bash
+exit 1
+EOF
+chmod +x "$PY_STUB/python3"
+for pyname in python3.9 python3.10 python3.11; do
+  cp "$PY_STUB/python3" "$PY_STUB/$pyname"
+done
+set +e
+PY_OUT=$(PATH="$PY_STUB:/usr/bin:/bin" jobs/deploy.sh --help 2>&1)
+PY_RC=$?
+set -e
+[[ "$PY_RC" -ne 0 ]]
+grep -q 'PYTHON_BIN' <<<"$PY_OUT"
+PY_OK=$(PATH="$PY_STUB:/usr/bin:/bin" PYTHON_BIN="$(command -v python3)" jobs/deploy.sh --help 2>&1)
+grep -q '用法' <<<"$PY_OK"
+rm -rf "$PY_STUB"
+
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 export CRAWLER_TESTING=1

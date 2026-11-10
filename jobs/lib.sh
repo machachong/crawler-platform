@@ -46,7 +46,31 @@ STATIC_STAGE=
 die() { printf '错误: %s\n' "$*" >&2; exit 1; }
 say() { printf '%s\n' "$*"; }
 require_cmd() { command -v "$1" >/dev/null 2>&1 || die "缺少命令: $1"; }
-py() { python3 "$JOBS_DIR/py/$1" "${@:2}"; }
+
+python_is_new_enough() {
+  "$1" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)' >/dev/null 2>&1
+}
+
+choose_python() {
+  local candidate
+  if [[ -n "${PYTHON_BIN:-}" ]]; then
+    if ! python_is_new_enough "$PYTHON_BIN"; then
+      die "PYTHON_BIN=${PYTHON_BIN} 不可用或低于 Python 3.9。不会修改系统默认 python3。"
+    fi
+    PY=$PYTHON_BIN
+    return 0
+  fi
+  for candidate in python3.11 python3.10 python3.9 python3; do
+    if command -v "$candidate" >/dev/null 2>&1 && python_is_new_enough "$candidate"; then
+      PY=$candidate
+      return 0
+    fi
+  done
+  die "未找到 Python 3.9 或更新的解释器。可设置 PYTHON_BIN=/usr/bin/python3.11。不会修改系统默认 python3，也不要改 PATH。"
+}
+
+choose_python
+py() { "$PY" "$JOBS_DIR/py/$1" "${@:2}"; }
 
 acquire_lock() {
   mkdir -p "$ROOT/jobs/state"
@@ -94,7 +118,7 @@ retry_git() {
 
 load_mirrors() {
   local exports
-  exports=$(python3 "$JOBS_DIR/../api/deploy/mirrors.py" shell-exports "$ROOT/jobs/mirrors.env")
+  exports=$( "$PY" "$JOBS_DIR/../api/deploy/mirrors.py" shell-exports "$ROOT/jobs/mirrors.env")
   if [[ -n "$exports" ]]; then
     # shellcheck disable=SC2086
     eval "$exports"
@@ -196,8 +220,8 @@ apply_stage() {
 preflight() {
   local ver
   require_cmd docker
-  require_cmd python3
   require_cmd timeout
+  say "Python: ${PY}"
   [[ -f "$ROOT/docker-compose.override.yml" ]] || die "缺少 docker-compose.override.yml。不要删除现有覆盖文件。部署不会加载它，避免把 5432/6379/8000 合并进来。"
   [[ -f "$ROOT/api/Dockerfile.deploy" ]] || die "缺少 api/Dockerfile.deploy"
   [[ -f "$ROOT/api/scripts/migrate_v2.py" ]] || die "缺少 api/scripts/migrate_v2.py"

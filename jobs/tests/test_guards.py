@@ -263,6 +263,13 @@ def test_mirrors_and_dockerfile() -> None:
     exported = mirrors.shell_exports(env)
     if "sk-" in exported or "OPENAI" in exported:
         fail("shell export leaked a secret")
+    for npm_url in ("https://registry.npmmirror.com", "https://registry.npmmirror.com/"):
+        env.write_text(f"NPM_REGISTRY={npm_url}\n", encoding="utf-8")
+        if mirrors.parse_env_file(env)["NPM_REGISTRY"] != "https://registry.npmmirror.com":
+            fail(f"npm registry rejected: {npm_url}")
+    example = mirrors.parse_env_file(ROOT / "jobs/mirrors.env.example")
+    if example.get("NPM_REGISTRY") != "https://registry.npmmirror.com":
+        fail("mirrors.env.example npm registry is not accepted")
     command = mirrors.pip_command("https://mirrors.aliyun.com/pypi/simple")
     if "--trusted-host" in command or "--retries" not in command:
         fail(command)

@@ -69,13 +69,13 @@ def normalize(url: str, *, https_only: bool) -> str:
     parts = urlsplit(raw)
     if parts.username or parts.password or parts.query or parts.fragment:
         raise MirrorError("镜像地址不能带账号、查询参数或片段")
-    if parts.scheme not in {"https", "http"} or not parts.hostname or parts.path == "":
+    if parts.scheme not in {"https", "http"} or not parts.hostname:
         raise MirrorError("镜像地址必须是 http(s) URL")
     if https_only and parts.scheme != "https":
         raise MirrorError("该镜像必须使用 https")
     if parts.scheme == "http" and parts.hostname != "deb.debian.org":
         raise MirrorError("除 deb.debian.org 外，镜像必须使用 https")
-    path = parts.path.rstrip("/")
+    path = (parts.path or "/").rstrip("/")
     return f"{parts.scheme}://{parts.netloc}{path}"
 
 
