@@ -191,7 +191,6 @@ if [[ "$MODE" == "deploy" ]]; then
   if [[ "$SKIP_STATIC" != "1" ]]; then
     build_static
   fi
-  docker image prune -f >/dev/null || say "悬空镜像清理失败。不要清理数据卷，也不要做整机镜像清理。"
   say "部署完成。修订: ${RESOLVED_SHA:-见 jobs/state/REVISION}"
   exit 0
 fi

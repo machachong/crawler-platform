@@ -84,13 +84,27 @@ mode=${DOCKER_MODE:-empty}
 if [[ "$1" == "ps" ]]; then
   if [[ "$mode" == "preflight" ]]; then
     printf '%s\n' db111 redis111 api111 worker111 sch111
-  elif [[ "$mode" == "running" ]]; then
+  elif [[ "$mode" == "running" || "$mode" == "deploy" ]]; then
     printf '%s\n' api111
   fi
   exit 0
 fi
 if [[ "$1" == "inspect" ]]; then
+  if [[ "$mode" == "deploy" && "$*" == *"Health"* ]]; then
+    printf '%s\n' healthy
+    exit 0
+  fi
   cat "$FIXTURE_INSPECT"
+  exit 0
+fi
+if [[ "$1" == "run" && "$mode" == "deploy" ]]; then
+  prev=""
+  for arg in "$@"; do
+    if [[ "$prev" == "-v" && "$arg" == *:/out ]]; then
+      printf '%s\n' '<script src="/crawler/a.js"></script>' > "${arg%:/out}/index.html"
+    fi
+    prev=$arg
+  done
   exit 0
 fi
 if [[ "$1" == "compose" ]]; then
@@ -104,6 +118,9 @@ if [[ "$1" == "compose" ]]; then
   fi
   if [[ "$*" == *"config"* ]]; then
     cat "$FIXTURE_CONFIG"
+    exit 0
+  fi
+  if [[ "$mode" == "deploy" ]]; then
     exit 0
   fi
 fi
@@ -325,6 +342,7 @@ if grep -E '(^| )(stop|down|rm)( |$)' "$DOCKER_LOG"; then
   exit 1
 fi
 [[ "$(cat "$PRE/docker-compose.override.yml")" == "override-keep" ]]
+cp "$TMP/config.yml" "$TMP/config.good.yml"
 
 python3 - "$TMP/config.yml" <<'PY'
 from pathlib import Path
@@ -340,4 +358,73 @@ BAD_PRE_RC=$?
 set -e
 [[ "$BAD_PRE_RC" -ne 0 ]]
 grep -q '5432' <<<"$BAD_PRE"
+
+if grep -n 'image prune\|volume prune\|system prune\|compose down' jobs/deploy.sh; then
+  echo "deploy.sh still cleans images or volumes" >&2
+  exit 1
+fi
+cp "$TMP/config.good.yml" "$TMP/config.yml"
+mkdir -p "$TMP/www/crawler" "$PRE/web"
+printf '{}\n' > "$PRE/web/package.json"
+printf '{}\n' > "$PRE/web/package-lock.json"
+export CRAWLER_TEST_TMP="$TMP"
+export CRAWLER_STATIC_ROOT="$TMP/www/crawler"
+export DOCKER_MODE=deploy
+export FIXTURE_INSPECT="$TMP/inspect.json"
+export FIXTURE_CONFIG="$TMP/config.yml"
+: > "$DOCKER_LOG"
+python3 - <<'PY' &
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = b'{"status":"healthy","database":true}'
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, _format, *_args):
+        return
+ThreadingHTTPServer(("127.0.0.1", 8010), Handler).serve_forever()
+PY
+HEALTH_PID=$!
+trap 'kill "$HEALTH_PID" 2>/dev/null || true; rm -rf "$TMP"' EXIT
+for _ in 1 2 3 4 5; do
+  if python3 -c 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8010/api/v1/health", timeout=1)'; then
+    break
+  fi
+  sleep 0.2
+done
+CRAWLER_ROOT="$PRE" jobs/deploy.sh
+python3 - "$DOCKER_LOG" <<'PY'
+import sys
+lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
+text = "\n".join(lines)
+for banned in ("image prune", "volume prune", "system prune", " compose down", " volume rm"):
+    if banned in text:
+        raise SystemExit("banned command: " + banned)
+ups = [line for line in lines if " up " in line]
+if len(ups) != 3:
+    raise SystemExit("up count %s" % len(ups))
+if "--no-recreate" not in ups[0] or "db redis" not in ups[0] or "--force-recreate" in ups[0]:
+    raise SystemExit("db/redis were not left untouched: " + ups[0])
+if "--force-recreate" not in ups[1] or not ups[1].rstrip().endswith(" api"):
+    raise SystemExit("api recreate missing: " + ups[1])
+if "worker scheduler" not in ups[2]:
+    raise SystemExit("worker recreate missing: " + ups[2])
+kinds = []
+for line in lines:
+    if " build " in line and "api worker scheduler" in line:
+        kinds.append("build")
+    elif " stop " in line:
+        kinds.append("stop")
+        if " db" in line or "redis" in line:
+            raise SystemExit("stopped db or redis: " + line)
+    elif " run " in line and "migrate_v2.py" in line:
+        kinds.append("migrate")
+    elif line.startswith("run "):
+        kinds.append("static")
+if kinds != ["build", "stop", "migrate", "static"]:
+    raise SystemExit("sequence %s" % kinds)
+print("deploy sequence ok")
+PY
 echo "shell checks ok"
