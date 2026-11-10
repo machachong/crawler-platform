@@ -204,6 +204,12 @@ def container(service, ports, volume=False, health=True, image="1"):
             "Name": "crawler-platform_postgres_data",
             "Destination": "/var/lib/postgresql/data",
         })
+    if service == "redis":
+        mounts.append({
+            "Type": "volume",
+            "Name": "e" * 64,
+            "Destination": "/data",
+        })
     state = {"Status": "running"}
     if health:
         state["Health"] = {"Status": "healthy"}
@@ -216,6 +222,7 @@ def container(service, ports, volume=False, health=True, image="1"):
         "Mounts": mounts,
         "NetworkSettings": {"Networks": {"crawler-platform_default": {}}},
         "Config": {
+            "Image": "docker.m.daocloud.io/library/postgres:15-alpine" if service == "db" else "docker.m.daocloud.io/library/redis:7-alpine",
             "Labels": {
                 "com.docker.compose.project": "crawler-platform",
                 "com.docker.compose.project.working_dir": root,
@@ -234,7 +241,10 @@ containers = [
     container("scheduler", [], health=False, image="e"),
 ]
 open(inspect_path, "w").write(json.dumps(containers))
-open(config_path, "w").write("""
+db_image = "sha256:" + "a" * 64
+redis_image = "sha256:" + "b" * 64
+redis_volume = "e" * 64
+open(config_path, "w").write(f"""
 name: crawler-platform
 services:
   api:
@@ -244,19 +254,23 @@ services:
         published: "8010"
         protocol: tcp
   db:
+    image: {db_image}
+    pull_policy: never
     ports:
       - mode: ingress
         target: 5432
         published: "5433"
         protocol: tcp
   redis:
+    image: {redis_image}
+    pull_policy: never
     ports:
       - mode: ingress
         target: 6379
         published: "6380"
         protocol: tcp
-  worker: {}
-  scheduler: {}
+  worker: {{}}
+  scheduler: {{}}
 networks:
   default:
     name: crawler-platform_default
@@ -264,6 +278,9 @@ networks:
 volumes:
   postgres_data:
     name: crawler-platform_postgres_data
+    external: true
+  redis_data:
+    name: {redis_volume}
     external: true
 """)
 PY
@@ -291,6 +308,12 @@ fi
 grep -q '8010:8000' "$PRE/jobs/state/compose.runtime.yml"
 grep -q '5433:5432' "$PRE/jobs/state/compose.runtime.yml"
 grep -q 'external:' "$PRE/jobs/state/compose.runtime.yml"
+grep -q 'pull_policy: never' "$PRE/jobs/state/compose.runtime.yml"
+grep -q 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' "$PRE/jobs/state/compose.runtime.yml"
+if grep -q 'postgres:15-alpine\|redis:7-alpine' "$PRE/jobs/state/compose.runtime.yml"; then
+  echo "runtime file selects stock database tags" >&2
+  exit 1
+fi
 if grep -q '5432:5432' "$PRE/jobs/state/compose.runtime.yml"; then
   echo "runtime file publishes the default db port" >&2
   exit 1

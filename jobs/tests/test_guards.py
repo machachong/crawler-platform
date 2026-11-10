@@ -47,6 +47,7 @@ def contract() -> dict:
         "redis_container": "b" * 64,
         "db_image": "sha256:" + "c" * 64,
         "redis_image": "sha256:" + "d" * 64,
+        "redis_volume": "e" * 64,
         "ports": {
             "api": {"host_ip": "", "host_port": 8010, "container_port": 8000},
             "db": {"host_ip": "", "host_port": 5433, "container_port": 5432},
@@ -59,9 +60,11 @@ def test_runtime_file_replaces_ports() -> None:
     text = checks.runtime_yaml(contract())
     if "!override" in text or "5432:5432" in text or "6379:6379" in text or "8000:8000" in text:
         fail("runtime file still merges default host ports")
-    for required in ("8010:8000", "5433:5432", "6380:6379", "crawler-platform_postgres_data", "external:"):
+    for required in ("8010:8000", "5433:5432", "6380:6379", "crawler-platform_postgres_data", "external:", "pull_policy: never", contract()["db_image"], contract()["redis_volume"]):
         if required not in text:
             fail(f"runtime file missing {required}")
+    if "postgres:15-alpine" in text or "redis:7-alpine" in text:
+        fail("runtime file selects stock database image names")
     if "\n  web:\n" in text:
         fail("runtime file includes web")
     checks.check_rendered(text, contract())
@@ -100,6 +103,12 @@ def test_discover_hides_secrets_and_requires_identity() -> None:
                 "Name": "crawler-platform_postgres_data",
                 "Destination": "/var/lib/postgresql/data",
             })
+        if service == "redis":
+            mounts.append({
+                "Type": "volume",
+                "Name": "f" * 64,
+                "Destination": "/data",
+            })
         state = {"Status": "running"}
         if health:
             state["Health"] = {"Status": health}
@@ -107,11 +116,11 @@ def test_discover_hides_secrets_and_requires_identity() -> None:
             "Id": {"db": "a", "redis": "b", "api": "c", "worker": "d", "scheduler": "e"}[service] * 64,
             "Name": f"/crawler-platform-{service}-1",
             "Image": "sha256:" + {"db": "1", "redis": "2", "api": "3", "worker": "4", "scheduler": "5"}[service] * 64,
-            "State": state,
-            "HostConfig": {"PortBindings": bindings or None},
-            "Mounts": mounts,
-            "NetworkSettings": {"Networks": {"crawler-platform_default": {}}},
             "Config": {
+                "Image": {
+                    "db": "docker.m.daocloud.io/library/postgres:15-alpine",
+                    "redis": "docker.m.daocloud.io/library/redis:7-alpine",
+                }.get(service, ""),
                 "Labels": {
                     "com.docker.compose.project": "crawler-platform",
                     "com.docker.compose.project.working_dir": root,
@@ -120,6 +129,10 @@ def test_discover_hides_secrets_and_requires_identity() -> None:
                 },
                 "Env": [f"OPENAI_API_KEY={secret}", "DATABASE_URL=postgresql://user:pass@db:5432/crawler_db"],
             },
+            "State": state,
+            "HostConfig": {"PortBindings": bindings or None},
+            "Mounts": mounts,
+            "NetworkSettings": {"Networks": {"crawler-platform_default": {}}},
         }
 
     containers = [
@@ -135,6 +148,15 @@ def test_discover_hides_secrets_and_requires_identity() -> None:
         fail("contract contains a secret")
     if found["network"] != "crawler-platform_default":
         fail("network was not preserved")
+    if found["db_image"] != "sha256:" + "1" * 64 or "postgres:15-alpine" in found["db_image"]:
+        fail("db image was not the observed sha256")
+    if found["redis_volume"] != "f" * 64:
+        fail("redis data volume was not preserved")
+    pinned = checks.runtime_yaml(found)
+    if "postgres:15-alpine" in pinned or "redis:7-alpine" in pinned or "daocloud.io" in pinned:
+        fail("runtime selected a registry tag instead of the running image id")
+    if found["db_image"] not in pinned or found["redis_image"] not in pinned or "pull_policy: never" not in pinned:
+        fail("runtime did not pin the observed image ids")
     bad = json.loads(json.dumps(containers))
     bad[0]["HostConfig"]["PortBindings"]["5432/tcp"].append({"HostIp": "", "HostPort": "5432"})
     if raises(lambda: checks.discover(bad, root, "crawler-platform", "crawler-platform_postgres_data")) is None:

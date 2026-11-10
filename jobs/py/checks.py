@@ -180,6 +180,13 @@ def discover(containers: list, root: str, expect_project: str, expect_volume: st
     if len(db_mounts) != 1 or db_mounts[0].get("Type") != "volume" or not db_mounts[0].get("Name"):
         raise GuardError("db 没有唯一的具名数据库卷，拒绝继续")
     volume = str(db_mounts[0]["Name"])
+    redis_mounts = [
+        mount for mount in (by_service["redis"].get("Mounts") or [])
+        if mount.get("Destination") == "/data" and mount.get("Type") == "volume" and mount.get("Name")
+    ]
+    if len(redis_mounts) != 1:
+        raise GuardError("redis 没有唯一的 /data 卷，拒绝继续")
+    redis_volume = str(redis_mounts[0]["Name"])
     network = _shared_network(by_service, project)
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,120}", project):
         raise GuardError("项目名含有不支持的字符")
@@ -187,6 +194,8 @@ def discover(containers: list, root: str, expect_project: str, expect_volume: st
         raise GuardError("数据库卷名含有不支持的字符")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,120}", network):
         raise GuardError("网络名含有不支持的字符")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,120}", redis_volume):
+        raise GuardError("redis 卷名含有不支持的字符")
     if project != expect_project or volume != expect_volume:
         raise GuardError(
             f"运行中的 Compose 项目是 {project}，数据库卷是 {volume}。"
@@ -209,6 +218,7 @@ def discover(containers: list, root: str, expect_project: str, expect_volume: st
         "redis_container": by_service["redis"]["Id"],
         "db_image": by_service["db"]["Image"],
         "redis_image": by_service["redis"]["Image"],
+        "redis_volume": redis_volume,
         "network": network,
         "ports": ports,
     }
@@ -268,11 +278,17 @@ def runtime_yaml(contract: dict) -> str:
     api = _port_line(contract["ports"]["api"])
     db = _port_line(contract["ports"]["db"])
     redis = _port_line(contract["ports"]["redis"])
+    for key in ("db_image", "redis_image"):
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", str(contract.get(key) or "")):
+            raise GuardError("拒绝把非 sha256 的 db/redis 镜像写入部署文件")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,120}", str(contract.get("redis_volume") or "")):
+        raise GuardError("拒绝把无法识别的 redis 卷写入部署文件")
     text = f"""# 单独交给 docker compose -f 使用，不要再叠加 docker-compose.yml 或 override。
-# 主机端口只保留当前容器已经发布的映射。
+# 主机端口只保留当前容器已经发布的映射。db/redis 使用预检看到的本地镜像 ID。
 services:
   db:
-    image: postgres:15-alpine
+    image: {contract["db_image"]}
+    pull_policy: never
     environment:
       POSTGRES_USER: user
       POSTGRES_PASSWORD: pass
@@ -287,7 +303,10 @@ services:
       timeout: 5s
       retries: 12
   redis:
-    image: redis:7-alpine
+    image: {contract["redis_image"]}
+    pull_policy: never
+    volumes:
+      - redis_data:/data
     ports:
       - "{redis}"
     healthcheck:
@@ -381,8 +400,11 @@ volumes:
   postgres_data:
     external:
       name: {contract["volume"]}
+  redis_data:
+    external:
+      name: {contract["redis_volume"]}
 """
-    for forbidden in ("!override", "5432:5432", "6379:6379", "8000:8000", "3000:3000", "\n  web:\n"):
+    for forbidden in ("!override", "5432:5432", "6379:6379", "8000:8000", "3000:3000", "\n  web:\n", "postgres:15-alpine", "redis:7-alpine"):
         if forbidden in text:
             raise GuardError("生成的部署文件含有禁止内容")
     if contract["volume"] not in text or contract["network"] not in text:
@@ -474,10 +496,27 @@ def check_rendered(text: str, contract: dict) -> None:
         raise GuardError(f"渲染后的主机端口是 {sorted(ports)}，只允许 8010、5433、6380")
     if contract["volume"] not in text:
         raise GuardError("渲染结果没有现有数据库卷名")
+    if contract.get("redis_volume") and contract["redis_volume"] not in text:
+        raise GuardError("渲染结果没有现有 redis 数据卷")
+    for key in ("db_image", "redis_image"):
+        image = contract.get(key) or ""
+        if image and image not in text:
+            raise GuardError("渲染结果没有钉住当前 db/redis 镜像")
+    if "postgres:15-alpine" in text or "redis:7-alpine" in text:
+        raise GuardError("渲染结果使用了本机没有的默认数据库镜像名")
     if contract["network"] not in text:
         raise GuardError("渲染结果没有现有网络名")
     if "external" not in text:
         raise GuardError("渲染结果没有把卷或网络标为 external")
+
+
+def _mount_name(container: dict, destination: str) -> str:
+    names = [
+        str(mount.get("Name") or "")
+        for mount in (container.get("Mounts") or [])
+        if mount.get("Destination") == destination and mount.get("Type") == "volume"
+    ]
+    return names[0] if len(names) == 1 else ""
 
 
 def assert_unchanged(contract: dict, containers: list) -> None:
@@ -495,6 +534,10 @@ def assert_unchanged(contract: dict, containers: list) -> None:
         current = found.get(service)
         if not current or current.get("Id") != contract[cid_key] or current.get("Image") != contract[image_key]:
             raise GuardError(f"{service} 容器或镜像在本次部署中发生变化，已停止后续步骤。不要执行 volume prune。")
+    db_mount = _mount_name(found.get("db") or {}, "/var/lib/postgresql/data")
+    redis_mount = _mount_name(found.get("redis") or {}, "/data")
+    if db_mount != contract.get("volume") or redis_mount != contract.get("redis_volume"):
+        raise GuardError("db 或 redis 的数据卷在本次部署中发生变化，已停止后续步骤。不要执行 volume prune。")
 
 
 def assert_healthy(body: str) -> None:
@@ -641,8 +684,9 @@ def print_contract(contract: dict) -> str:
         f"db {ports['db']['host_port']}->{ports['db']['container_port']}, "
         f"redis {ports['redis']['host_port']}->{ports['redis']['container_port']}",
         f"网络: {contract['network']}",
-        f"db镜像: {short_image(contract['db_image'])}",
-        f"redis镜像: {short_image(contract['redis_image'])}",
+        f"db镜像: {contract['db_image']}",
+        f"redis镜像: {contract['redis_image']}",
+        f"redis卷: {contract['redis_volume']}",
         "不发布: 8000 5432 6379 3000",
         "部署文件: jobs/state/compose.runtime.yml（单独使用，不含 web）",
     ])
@@ -716,7 +760,7 @@ def main(argv: list[str]) -> None:
     if command == "print-field":
         contract = load_json(Path(_arg(argv, "--contract")))
         field = _arg(argv, "--field")
-        if field not in {"project", "volume", "network", "db_container", "redis_container", "db_image", "redis_image", "working_dir"}:
+        if field not in {"project", "volume", "redis_volume", "network", "db_container", "redis_container", "db_image", "redis_image", "working_dir"}:
             raise GuardError("字段不允许打印")
         value = str(contract[field])
         if not re.fullmatch(r"[A-Za-z0-9_.:/-]{1,200}", value):
