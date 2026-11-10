@@ -20,6 +20,20 @@ DEFAULT_SERVICES = {"api", "db", "redis", "scheduler", "worker"}
 APP_SERVICES = {"api", "worker", "scheduler"}
 PRODUCTION_STATIC = Path("/var/www/zhengaihe/crawler")
 PRODUCTION_ROOT = Path("/home/workspace/crawler-platform")
+PYTHON_BASE_DEFAULT = "python:3.11-slim-bookworm"
+NODE_BASE_DEFAULT = "node:22-bookworm-slim"
+BASE_IMAGES = {
+    "python": {
+        PYTHON_BASE_DEFAULT,
+        "docker.io/library/python:3.11-slim-bookworm",
+        "docker.m.daocloud.io/library/python:3.11-slim-bookworm",
+    },
+    "node": {
+        NODE_BASE_DEFAULT,
+        "docker.io/library/node:22-bookworm-slim",
+        "docker.m.daocloud.io/library/node:22-bookworm-slim",
+    },
+}
 
 
 class GuardError(SystemExit):
@@ -283,6 +297,7 @@ def runtime_yaml(contract: dict) -> str:
             raise GuardError("拒绝把非 sha256 的 db/redis 镜像写入部署文件")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,120}", str(contract.get("redis_volume") or "")):
         raise GuardError("拒绝把无法识别的 redis 卷写入部署文件")
+    python_base = select_base("python")
     text = f"""# 单独交给 docker compose -f 使用，不要再叠加 docker-compose.yml 或 override。
 # 主机端口只保留当前容器已经发布的映射。db/redis 使用预检看到的本地镜像 ID。
 services:
@@ -322,6 +337,7 @@ services:
         APT_MIRROR: ${{APT_MIRROR:-}}
         APT_SECURITY_MIRROR: ${{APT_SECURITY_MIRROR:-}}
         PIP_INDEX_URL: ${{PIP_INDEX_URL:-}}
+        PYTHON_BASE_IMAGE: "{python_base}"
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
     volumes:
       - ./api:/app
@@ -356,6 +372,7 @@ services:
         APT_MIRROR: ${{APT_MIRROR:-}}
         APT_SECURITY_MIRROR: ${{APT_SECURITY_MIRROR:-}}
         PIP_INDEX_URL: ${{PIP_INDEX_URL:-}}
+        PYTHON_BASE_IMAGE: "{python_base}"
     command: celery -A app.worker.tasks worker --loglevel=info --concurrency=2
     volumes:
       - ./api:/app
@@ -380,6 +397,7 @@ services:
         APT_MIRROR: ${{APT_MIRROR:-}}
         APT_SECURITY_MIRROR: ${{APT_SECURITY_MIRROR:-}}
         PIP_INDEX_URL: ${{PIP_INDEX_URL:-}}
+        PYTHON_BASE_IMAGE: "{python_base}"
     command: python scripts/scheduler.py
     restart: unless-stopped
     volumes:
@@ -669,6 +687,20 @@ def assert_repo(url: str) -> str:
     return resolved
 
 
+def select_base(kind: str) -> str:
+    if kind not in BASE_IMAGES:
+        raise GuardError("基础镜像种类只能是 python 或 node")
+    env_name = "PYTHON_BASE_IMAGE" if kind == "python" else "NODE_BASE_IMAGE"
+    default = PYTHON_BASE_DEFAULT if kind == "python" else NODE_BASE_DEFAULT
+    value = os.environ.get(env_name, "").strip()
+    if not value:
+        return default
+    if value not in BASE_IMAGES[kind]:
+        allowed = "、".join(sorted(BASE_IMAGES[kind]))
+        raise GuardError(f"{env_name} 不在允许列表中: {allowed}")
+    return value
+
+
 def short_image(image: str) -> str:
     return image.removeprefix("sha256:")[:12]
 
@@ -710,6 +742,9 @@ def main(argv: list[str]) -> None:
     if len(argv) < 2:
         raise GuardError("缺少命令")
     command = argv[1]
+    if command == "base-image":
+        sys.stdout.write(select_base(_arg(argv, "--kind")) + "\n")
+        return
     if command == "compose-version":
         sys.stdout.write(describe_compose_version(_arg(argv, "--text")) + "\n")
         return

@@ -3,7 +3,10 @@
 # follows Debian 11, whose security archive now returns 404 and can stall apt.
 # Do not switch this file back to that release. Do not ignore missing packages,
 # disable Release expiry checks, or mark repositories as trusted.
-FROM python:3.11-slim-bookworm
+# PYTHON_BASE_IMAGE defaults to the Docker Hub name. jobs/deploy.sh only
+# accepts that name or the same tag under docker.m.daocloud.io/library.
+ARG PYTHON_BASE_IMAGE=python:3.11-slim-bookworm
+FROM ${PYTHON_BASE_IMAGE}
 
 WORKDIR /app
 

@@ -65,6 +65,23 @@ def test_runtime_file_replaces_ports() -> None:
             fail(f"runtime file missing {required}")
     if "postgres:15-alpine" in text or "redis:7-alpine" in text:
         fail("runtime file selects stock database image names")
+    if 'PYTHON_BASE_IMAGE: "python:3.11-slim-bookworm"' not in text:
+        fail("default python base image changed")
+    os.environ["PYTHON_BASE_IMAGE"] = "docker.m.daocloud.io/library/python:3.11-slim-bookworm"
+    try:
+        mirrored = checks.runtime_yaml(contract())
+    finally:
+        os.environ.pop("PYTHON_BASE_IMAGE", None)
+    if 'PYTHON_BASE_IMAGE: "docker.m.daocloud.io/library/python:3.11-slim-bookworm"' not in mirrored:
+        fail("daocloud python base was not accepted")
+    if contract()["db_image"] not in mirrored or "pull_policy: never" not in mirrored:
+        fail("database pin changed while selecting a build base")
+    os.environ["NODE_BASE_IMAGE"] = "example.invalid/node:22-bookworm-slim"
+    try:
+        if raises(lambda: checks.select_base("node")) is None:
+            fail("arbitrary node registry was accepted")
+    finally:
+        os.environ.pop("NODE_BASE_IMAGE", None)
     if "\n  web:\n" in text:
         fail("runtime file includes web")
     checks.check_rendered(text, contract())

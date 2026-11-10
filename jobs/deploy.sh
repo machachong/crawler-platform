@@ -100,6 +100,8 @@ build_static() {
   if [[ -n "${NPM_REGISTRY:-}" ]]; then
     npm_env+=(-e "NPM_CONFIG_REGISTRY=${NPM_REGISTRY}")
   fi
+  local node_image
+  node_image=$(py checks.py base-image --kind node)
   if ! timeout 900 docker run --rm \
       -v "$ROOT/web:/src:ro" \
       -v "$STATIC_STAGE:/out" \
@@ -111,7 +113,7 @@ build_static() {
       -e NPM_CONFIG_FETCH_TIMEOUT=60000 \
       -e NPM_CONFIG_FETCH_RETRY_MAXTIMEOUT=120000 \
       "${npm_env[@]}" \
-      node:22-bookworm-slim \
+      "$node_image" \
       bash -ceu 'set -o pipefail
         . /etc/os-release
         test "$VERSION_CODENAME" = bookworm
