@@ -37,6 +37,7 @@ RUN python3 /tmp/mirrors.py apply-apt \
 
 COPY requirements.txt .
 RUN python3 /tmp/mirrors.py pip-install \
+    && python3 -c "import PIL; print(PIL.__file__)" \
     && rm -f /tmp/mirrors.py
 
 COPY . .

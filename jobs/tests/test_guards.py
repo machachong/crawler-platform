@@ -324,6 +324,8 @@ def test_mirrors_and_dockerfile() -> None:
     dockerfile = (ROOT / "api/Dockerfile.deploy").read_text(encoding="utf-8")
     if "python:3.11-slim-bookworm" not in dockerfile or "bullseye" in dockerfile:
         fail("deploy image is not pinned to Debian 12")
+    if 'import PIL' not in dockerfile:
+        fail("image build does not check that Pillow imports")
     lowered = dockerfile.lower()
     for banned in ("fix-missing", "check-valid-until", "allowinsecure", "trusted=yes"):
         if banned in lowered:

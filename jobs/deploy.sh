@@ -145,8 +145,42 @@ stop_app() {
   run_compose 90 stop -t 20 api worker scheduler
 }
 
-start_previous_app() {
-  run_compose 180 up -d --no-build --no-recreate --no-deps api worker scheduler || true
+save_previous_app() {
+  APP_ID_FILE="$ROOT/jobs/state/previous-app.ids"
+  mkdir -p "$ROOT/jobs/state"
+  chmod 700 "$ROOT/jobs/state"
+  docker ps -a \
+    --filter "label=com.docker.compose.project=${PROJECT}" \
+    --filter "label=com.docker.compose.oneoff=False" \
+    --format '{{.Label "com.docker.compose.service"}} {{.ID}} {{.Image}}' \
+    | awk '$1 == "api" || $1 == "worker" || $1 == "scheduler" { print }' \
+    > "$APP_ID_FILE"
+  chmod 600 "$APP_ID_FILE"
+}
+
+restore_previous_app() {
+  local svc id image
+  if [[ ! -s "${APP_ID_FILE:-}" ]]; then
+    say "没有停止前的 api/worker/scheduler 容器记录。不会新建容器。"
+    return 0
+  fi
+  while read -r svc id image; do
+    [[ -n "${id:-}" ]] || continue
+    if docker start "$id"; then
+      say "已启动停止前的容器 ${svc} ${id}"
+    else
+      say "原容器 ${svc} ${id} 镜像 ${image} 未能启动。不要 compose up，不要 prune。"
+    fi
+  done < "$APP_ID_FILE"
+}
+
+smoke_new_image() {
+  say "停止旧服务之前，用刚构建的镜像和当前代码目录检查导入"
+  if ! run_compose 180 run --rm --no-deps --no-build --entrypoint python3 api -c \
+    'import sys,PIL,app.main; print("executable="+sys.executable); print("PIL="+PIL.__file__); print("APP_IMPORT_OK")'
+  then
+    return 1
+  fi
 }
 
 if [[ "$MODE" == "preflight" ]]; then
@@ -157,6 +191,7 @@ fi
 preflight
 
 if [[ "$UPDATE" == "1" ]]; then
+  save_previous_app
   prepare_stage "$REF" "$SHA"
   stop_app
   apply_stage
@@ -165,20 +200,27 @@ fi
 if [[ "$MODE" == "deploy" && "$SKIP_BUILD" != "1" ]]; then
   if ! run_compose 900 build api worker scheduler; then
     if [[ "$UPDATE" == "1" ]]; then
-      start_previous_app
+      restore_previous_app
     fi
     die "构建失败。未删除数据库卷。构建使用 api/Dockerfile.deploy（Debian 12 bookworm）。"
   fi
 fi
 
 if [[ "$MODE" == "deploy" ]]; then
+  if ! smoke_new_image; then
+    if [[ "$UPDATE" == "1" ]]; then
+      restore_previous_app
+    fi
+    die "新镜像导入检查失败，未继续迁移。普通部署此时还没停止旧服务。不要 compose up，不要 prune。"
+  fi
   if [[ "$UPDATE" != "1" ]]; then
+    save_previous_app
     stop_app
   fi
   if [[ "$SKIP_MIGRATE" != "1" ]]; then
-    if ! run_compose 600 run --rm --no-deps --no-build api python scripts/migrate_v2.py; then
-      start_previous_app
-      die "迁移失败。命令是 python scripts/migrate_v2.py。数据库卷未删除。"
+    if ! run_compose 600 run --rm --no-deps --no-build --entrypoint python3 api scripts/migrate_v2.py; then
+      restore_previous_app
+      die "迁移失败。已尝试启动停止前记录的容器。数据库卷未删除。"
     fi
   fi
   run_compose 180 up -d --no-build --no-recreate --no-deps db redis

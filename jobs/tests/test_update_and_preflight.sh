@@ -419,12 +419,16 @@ for line in lines:
         kinds.append("stop")
         if " db" in line or "redis" in line:
             raise SystemExit("stopped db or redis: " + line)
+    elif " run " in line and "APP_IMPORT_OK" in line:
+        kinds.append("smoke")
     elif " run " in line and "migrate_v2.py" in line:
         kinds.append("migrate")
     elif line.startswith("run "):
         kinds.append("static")
-if kinds != ["build", "stop", "migrate", "static"]:
+if kinds != ["build", "smoke", "stop", "migrate", "static"]:
     raise SystemExit("sequence %s" % kinds)
+if any("docker start" in line or line.startswith("start ") for line in lines):
+    raise SystemExit("success path started old containers")
 print("deploy sequence ok")
 PY
 echo "shell checks ok"
