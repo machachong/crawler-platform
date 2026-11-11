@@ -1,0 +1,45 @@
+# Deploy-only image used by jobs/deploy.sh. Local api/Dockerfile is unchanged.
+# Debian 12 (bookworm) is the supported base. The floating python:3.10-slim tag
+# follows Debian 11, whose security archive now returns 404 and can stall apt.
+# Do not switch this file back to that release. Do not ignore missing packages,
+# disable Release expiry checks, or mark repositories as trusted.
+# PYTHON_BASE_IMAGE defaults to the Docker Hub name. jobs/deploy.sh only
+# accepts that name or the same tag under docker.m.daocloud.io/library.
+ARG PYTHON_BASE_IMAGE=python:3.11-slim-bookworm
+FROM ${PYTHON_BASE_IMAGE}
+
+WORKDIR /app
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_DEFAULT_TIMEOUT=60 \
+    DEBIAN_FRONTEND=noninteractive
+
+ARG APT_MIRROR=
+ARG APT_SECURITY_MIRROR=
+ARG PIP_INDEX_URL=
+ENV APT_MIRROR=${APT_MIRROR} \
+    APT_SECURITY_MIRROR=${APT_SECURITY_MIRROR} \
+    PIP_INDEX_URL=${PIP_INDEX_URL}
+
+COPY deploy/mirrors.py /tmp/mirrors.py
+RUN python3 /tmp/mirrors.py apply-apt \
+    && . /etc/os-release \
+    && test "$VERSION_CODENAME" = "bookworm" \
+    && test "$VERSION_ID" = "12" \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        gcc \
+        libpq-dev \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN python3 /tmp/mirrors.py pip-install \
+    && python3 -c "import PIL; print(PIL.__file__)" \
+    && rm -f /tmp/mirrors.py
+
+COPY . .
+
+EXPOSE 8000
