@@ -60,6 +60,10 @@ choose_python() {
     PY=$PYTHON_BIN
     return 0
   fi
+  if [[ -x /home/admin/.local/bin/python3.11 ]] && python_is_new_enough /home/admin/.local/bin/python3.11; then
+    PY=/home/admin/.local/bin/python3.11
+    return 0
+  fi
   for candidate in python3.11 python3.10 python3.9 python3; do
     if command -v "$candidate" >/dev/null 2>&1 && python_is_new_enough "$candidate"; then
       PY=$candidate

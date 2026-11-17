@@ -298,6 +298,22 @@ def runtime_yaml(contract: dict) -> str:
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,120}", str(contract.get("redis_volume") or "")):
         raise GuardError("拒绝把无法识别的 redis 卷写入部署文件")
     python_base = select_base("python")
+    app_image = str(contract.get("app_image") or "")
+    if app_image:
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", app_image):
+            raise GuardError("应用镜像必须是 sha256")
+        image_block = f"    image: {app_image}\n    pull_policy: never"
+    else:
+        image_block = "\n".join([
+            "    build:",
+            "      context: ./api",
+            "      dockerfile: Dockerfile.deploy",
+            "      args:",
+            "        APT_MIRROR: ${APT_MIRROR:-}",
+            "        APT_SECURITY_MIRROR: ${APT_SECURITY_MIRROR:-}",
+            "        PIP_INDEX_URL: ${PIP_INDEX_URL:-}",
+            f'        PYTHON_BASE_IMAGE: "{python_base}"',
+        ])
     text = f"""# 单独交给 docker compose -f 使用，不要再叠加 docker-compose.yml 或 override。
 # 主机端口只保留当前容器已经发布的映射。db/redis 使用预检看到的本地镜像 ID。
 services:
@@ -330,14 +346,7 @@ services:
       timeout: 3s
       retries: 12
   api:
-    build:
-      context: ./api
-      dockerfile: Dockerfile.deploy
-      args:
-        APT_MIRROR: ${{APT_MIRROR:-}}
-        APT_SECURITY_MIRROR: ${{APT_SECURITY_MIRROR:-}}
-        PIP_INDEX_URL: ${{PIP_INDEX_URL:-}}
-        PYTHON_BASE_IMAGE: "{python_base}"
+{image_block}
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
     volumes:
       - ./api:/app
@@ -365,14 +374,7 @@ services:
       redis:
         condition: service_healthy
   worker:
-    build:
-      context: ./api
-      dockerfile: Dockerfile.deploy
-      args:
-        APT_MIRROR: ${{APT_MIRROR:-}}
-        APT_SECURITY_MIRROR: ${{APT_SECURITY_MIRROR:-}}
-        PIP_INDEX_URL: ${{PIP_INDEX_URL:-}}
-        PYTHON_BASE_IMAGE: "{python_base}"
+{image_block}
     command: celery -A app.worker.tasks worker --loglevel=info --concurrency=2
     volumes:
       - ./api:/app
@@ -390,15 +392,8 @@ services:
       redis:
         condition: service_healthy
   scheduler:
-    build:
-      context: ./api
-      dockerfile: Dockerfile.deploy
-      args:
-        APT_MIRROR: ${{APT_MIRROR:-}}
-        APT_SECURITY_MIRROR: ${{APT_SECURITY_MIRROR:-}}
-        PIP_INDEX_URL: ${{PIP_INDEX_URL:-}}
-        PYTHON_BASE_IMAGE: "{python_base}"
-    command: python scripts/scheduler.py
+{image_block}
+    command: python3 scripts/scheduler.py
     restart: unless-stopped
     volumes:
       - ./api:/app

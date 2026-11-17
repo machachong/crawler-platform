@@ -82,6 +82,10 @@ cat > "$BIN/docker" <<'EOF'
 printf '%s\n' "$*" >> "$DOCKER_LOG"
 mode=${DOCKER_MODE:-empty}
 if [[ "$1" == "ps" ]]; then
+  if [[ "$mode" == "deploy" && "$*" == *".ID"* ]]; then
+    printf '%s\n' 'api aabbccddeeff00112233445566778899 sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'
+    exit 0
+  fi
   if [[ "$mode" == "preflight" ]]; then
     printf '%s\n' db111 redis111 api111 worker111 sch111
   elif [[ "$mode" == "running" || "$mode" == "deploy" ]]; then
@@ -94,10 +98,46 @@ if [[ "$1" == "inspect" ]]; then
     printf '%s\n' healthy
     exit 0
   fi
+  if [[ "$mode" == "deploy" && "$*" == *".Id"* ]]; then
+    printf 'sha256:%s\n' "$(printf 'ab%.0s' {1..32})"
+    exit 0
+  fi
+  if [[ "$mode" == "deploy" && "$*" == *".Image"* ]]; then
+    printf 'sha256:%s\n' "$(printf 'ab%.0s' {1..32})"
+    exit 0
+  fi
+  if [[ "$mode" == "deploy" && "$*" == *"Config.Env"* ]]; then
+    printf '%s\n' 'PATH=/usr/local/bin'
+    exit 0
+  fi
   cat "$FIXTURE_INSPECT"
   exit 0
 fi
+if [[ "$1" == "build" && "$mode" == "deploy" ]]; then
+  printf 'sha256:%s\n' "$(printf 'ab%.0s' {1..32})"
+  exit 0
+fi
+if [[ "$1" == "image" && "$2" == "inspect" && "$mode" == "deploy" ]]; then
+  printf 'sha256:%s\n' "$(printf 'ab%.0s' {1..32})"
+  exit 0
+fi
+if [[ "$1" == "exec" && "$mode" == "deploy" ]]; then
+  printf 'PGDMP'
+  exit 0
+fi
+if [[ "$1" == "start" || "$1" == "rm" ]]; then
+  if [[ "${DOCKER_FAIL:-}" == "migrate" && "$1" == "start" ]]; then
+    exit 0
+  fi
+  exit 0
+fi
 if [[ "$1" == "run" && "$mode" == "deploy" ]]; then
+  if [[ "$*" == *"APP_IMPORT_OK"* && "${DOCKER_FAIL:-}" == "smoke" ]]; then
+    exit 1
+  fi
+  if [[ "$*" == *"migrate_v2.py"* && "${DOCKER_FAIL:-}" == "migrate" ]]; then
+    exit 1
+  fi
   prev=""
   for arg in "$@"; do
     if [[ "$prev" == "-v" && "$arg" == *:/out ]]; then
@@ -373,6 +413,19 @@ export DOCKER_MODE=deploy
 export FIXTURE_INSPECT="$TMP/inspect.json"
 export FIXTURE_CONFIG="$TMP/config.yml"
 : > "$DOCKER_LOG"
+mkdir -p "$PRE/api/deploy" "$TMP/mainsrc/api/app" "$TMP/mainsrc/api/scripts" "$TMP/mainsrc/web"
+cp "$REPO/api/deploy/mirrors.py" "$PRE/api/deploy/mirrors.py"
+printf 'from PIL import Image\n' > "$TMP/mainsrc/api/app/captcha.py"
+printf 'print("migrate")\n' > "$TMP/mainsrc/api/scripts/migrate_v2.py"
+printf 'Pillow\n' > "$TMP/mainsrc/api/requirements.txt"
+printf 'FROM scratch\n' > "$TMP/mainsrc/api/Dockerfile"
+printf '{}\n' > "$TMP/mainsrc/web/package.json"
+printf '{}\n' > "$TMP/mainsrc/web/package-lock.json"
+printf 'services: {}\n' > "$TMP/mainsrc/docker-compose.yml"
+tar -C "$TMP/mainsrc" -czf "$TMP/main.tar.gz" .
+MAIN_SHA=cfa197d249f07ea4e1663ae312c1e42cc6468e67
+printf 'ADMIN-KEEP\n' > "$PRE/jobs/create-admin.sh"
+printf 'SECRET=keep\n' > "$PRE/.env"
 python3 - <<'PY' &
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 class Handler(BaseHTTPRequestHandler):
@@ -394,7 +447,37 @@ for _ in 1 2 3 4 5; do
   fi
   sleep 0.2
 done
-CRAWLER_ROOT="$PRE" jobs/deploy.sh
+set +e
+SMOKE_FAIL=$(DOCKER_FAIL=smoke CRAWLER_ROOT="$PRE" jobs/deploy.sh --archive "$TMP/main.tar.gz" --sha "$MAIN_SHA" 2>&1)
+SMOKE_RC=$?
+set -e
+[[ "$SMOKE_RC" -ne 0 ]]
+grep -q '导入检查失败' <<<"$SMOKE_FAIL"
+if grep -q '部署完成' <<<"$SMOKE_FAIL"; then
+  echo "smoke failure claimed success" >&2
+  exit 1
+fi
+if grep -q ' stop ' "$DOCKER_LOG"; then
+  echo "smoke failure stopped services" >&2
+  exit 1
+fi
+: > "$DOCKER_LOG"
+set +e
+MIGRATE_FAIL=$(DOCKER_FAIL=migrate CRAWLER_ROOT="$PRE" jobs/deploy.sh --archive "$TMP/main.tar.gz" --sha "$MAIN_SHA" 2>&1)
+MIGRATE_RC=$?
+set -e
+[[ "$MIGRATE_RC" -ne 0 ]]
+grep -q '迁移失败' <<<"$MIGRATE_FAIL"
+if grep -q '部署完成' <<<"$MIGRATE_FAIL"; then
+  echo "migrate failure claimed success" >&2
+  exit 1
+fi
+grep -q '^start ' "$DOCKER_LOG"
+[[ "$(cat "$PRE/.env")" == "SECRET=keep" ]]
+[[ "$(cat "$PRE/jobs/create-admin.sh")" == "ADMIN-KEEP" ]]
+: > "$DOCKER_LOG"
+unset DOCKER_FAIL
+CRAWLER_ROOT="$PRE" jobs/deploy.sh --archive "$TMP/main.tar.gz" --sha "$MAIN_SHA"
 python3 - "$DOCKER_LOG" <<'PY'
 import sys
 lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
@@ -402,33 +485,32 @@ text = "\n".join(lines)
 for banned in ("image prune", "volume prune", "system prune", " compose down", " volume rm"):
     if banned in text:
         raise SystemExit("banned command: " + banned)
-ups = [line for line in lines if " up " in line]
-if len(ups) != 3:
-    raise SystemExit("up count %s" % len(ups))
-if "--no-recreate" not in ups[0] or "db redis" not in ups[0] or "--force-recreate" in ups[0]:
-    raise SystemExit("db/redis were not left untouched: " + ups[0])
-if "--force-recreate" not in ups[1] or not ups[1].rstrip().endswith(" api"):
-    raise SystemExit("api recreate missing: " + ups[1])
-if "worker scheduler" not in ups[2]:
-    raise SystemExit("worker recreate missing: " + ups[2])
+for banned in ("--pull ", "--no-cache", "image prune", " compose down", " volume rm"):
+    if banned in text:
+        raise SystemExit("banned " + banned)
+ups = [line for line in lines if line.startswith("compose ") and " up " in line]
+if len(ups) != 1 or "--no-recreate" not in ups[0] or "db redis" not in ups[0]:
+    raise SystemExit("db/redis up mismatch %s" % ups)
+if any("--force-recreate" in line for line in lines):
+    raise SystemExit("force recreate still present")
 kinds = []
 for line in lines:
-    if " build " in line and "api worker scheduler" in line:
+    if line.startswith("build "):
         kinds.append("build")
-    elif " stop " in line:
+    elif line.startswith("compose ") and " stop " in line:
         kinds.append("stop")
         if " db" in line or "redis" in line:
-            raise SystemExit("stopped db or redis: " + line)
-    elif " run " in line and "APP_IMPORT_OK" in line:
+            raise SystemExit("stopped db or redis")
+    elif line.startswith("run ") and "APP_IMPORT_OK" in line:
         kinds.append("smoke")
-    elif " run " in line and "migrate_v2.py" in line:
+    elif line.startswith("run ") and "migrate_v2.py" in line:
         kinds.append("migrate")
-    elif line.startswith("run "):
+    elif line.startswith("run ") and ":/out" in line:
         kinds.append("static")
 if kinds != ["build", "smoke", "stop", "migrate", "static"]:
     raise SystemExit("sequence %s" % kinds)
-if any("docker start" in line or line.startswith("start ") for line in lines):
-    raise SystemExit("success path started old containers")
+if not any(line.startswith("run ") and "sha256:" in line and "APP_IMPORT_OK" in line for line in lines):
+    raise SystemExit("smoke did not use image id")
 print("deploy sequence ok")
 PY
 echo "shell checks ok"
