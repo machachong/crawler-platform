@@ -100,6 +100,8 @@ docker compose up --build
 
 Postgres 数据在卷 `postgres_data`。首次启动会 `create_all` 建表；已有表的结构变更需要数据库迁移。不要通过删除数据卷升级。
 
+阿里云上手动更新见 [jobs/使用说明.md](jobs/使用说明.md)。生产部署只使用脚本生成的单独 compose 文件，不要把本文件和服务器上的 `docker-compose.override.yml` 叠在一起执行，否则会多发布 5432、6379 和 8000。
+
 ### 冒烟：quotes.toscrape.com
 
 服务起来之后：

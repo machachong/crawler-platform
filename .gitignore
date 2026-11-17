@@ -10,3 +10,5 @@ node_modules/
 dist/
 logs-*.out
 logs-*.err
+jobs/state/
+jobs/mirrors.env

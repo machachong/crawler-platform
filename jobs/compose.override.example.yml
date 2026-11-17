@@ -1,0 +1,4 @@
+# 对照用，不要覆盖服务器上的 docker-compose.override.yml，也不要和仓库 compose 叠在一起使用。
+# 部署脚本不加载本文件，也不使用 !override。它会按当前容器生成单独的
+# jobs/state/compose.runtime.yml，只发布 8010、5433、6380。
+# 服务器上现有覆盖文件的作用是：API 8010、数据库 5433、Redis 6380，web 使用 local-web profile。
