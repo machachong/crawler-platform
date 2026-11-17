@@ -82,8 +82,12 @@ cat > "$BIN/docker" <<'EOF'
 printf '%s\n' "$*" >> "$DOCKER_LOG"
 mode=${DOCKER_MODE:-empty}
 if [[ "$1" == "ps" ]]; then
-  if [[ "$mode" == "deploy" && "$*" == *".ID"* ]]; then
-    printf '%s\n' 'api aabbccddeeff00112233445566778899 sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'
+  if [[ "$mode" == "deploy" && "$*" == *".ID"* && "$*" != *"-a"* ]]; then
+    printf '%s\n' 'worker f3fcaae2f3fcaae2f3fcaae2f3fcaae2 sha256:aa22d520aa22d520aa22d520aa22d520aa22d520aa22d520aa22d520aa22d520'
+    exit 0
+  fi
+  if [[ "$mode" == "deploy" && "$*" == *"-aq"* && "$*" == *"service=api"* ]]; then
+    printf '%s\n' '6c51bbc26c51bbc26c51bbc26c51bbc2'
     exit 0
   fi
   if [[ "$mode" == "preflight" ]]; then
@@ -132,6 +136,33 @@ if [[ "$1" == "start" || "$1" == "rm" ]]; then
   exit 0
 fi
 if [[ "$1" == "run" && "$mode" == "deploy" ]]; then
+  seen=0
+  skip=0
+  for arg in "$@"; do
+    if [[ "$skip" == "1" ]]; then
+      skip=0
+      continue
+    fi
+    [[ "$arg" == "run" && "$seen" == "0" ]] && continue
+    case "$arg" in
+      --entrypoint|--network|--name|--env-file|--label|--restart|-v|-w|-e|-p)
+        if [[ "$seen" == "1" ]]; then
+          echo "docker option after image: $arg" >&2
+          exit 99
+        fi
+        skip=1
+        ;;
+      --pull=false|--rm|-d)
+        if [[ "$seen" == "1" ]]; then
+          echo "docker option after image: $arg" >&2
+          exit 99
+        fi
+        ;;
+      *)
+        seen=1
+        ;;
+    esac
+  done
   if [[ "$*" == *"APP_IMPORT_OK"* && "${DOCKER_FAIL:-}" == "smoke" ]]; then
     exit 1
   fi
@@ -392,12 +423,16 @@ text = path.read_text()
 text = text.replace('published: "5433"', 'published: "5433"\n      - mode: ingress\n        target: 5432\n        published: "5432"\n        protocol: tcp', 1)
 path.write_text(text)
 PY
+printf 'SENTINEL-CONTRACT\n' > "$PRE/jobs/state/contract.json"
+printf 'SENTINEL-RUNTIME\n' > "$PRE/jobs/state/compose.runtime.yml"
 set +e
 BAD_PRE=$(CRAWLER_ROOT="$PRE" jobs/deploy.sh --preflight-only 2>&1)
 BAD_PRE_RC=$?
 set -e
 [[ "$BAD_PRE_RC" -ne 0 ]]
 grep -q '5432' <<<"$BAD_PRE"
+[[ "$(cat "$PRE/jobs/state/contract.json")" == "SENTINEL-CONTRACT" ]]
+[[ "$(cat "$PRE/jobs/state/compose.runtime.yml")" == "SENTINEL-RUNTIME" ]]
 
 if grep -n 'image prune\|volume prune\|system prune\|compose down' jobs/deploy.sh; then
   echo "deploy.sh still cleans images or volumes" >&2
@@ -462,6 +497,9 @@ if grep -q ' stop ' "$DOCKER_LOG"; then
   exit 1
 fi
 : > "$DOCKER_LOG"
+printf '{"name":"old-web"}\n' > "$PRE/web/package.json"
+mkdir -p "$PRE/api/app"
+printf 'old-captcha\n' > "$PRE/api/app/captcha.py"
 set +e
 MIGRATE_FAIL=$(DOCKER_FAIL=migrate CRAWLER_ROOT="$PRE" jobs/deploy.sh --archive "$TMP/main.tar.gz" --sha "$MAIN_SHA" 2>&1)
 MIGRATE_RC=$?
@@ -472,7 +510,13 @@ if grep -q '部署完成' <<<"$MIGRATE_FAIL"; then
   echo "migrate failure claimed success" >&2
   exit 1
 fi
-grep -q '^start ' "$DOCKER_LOG"
+grep -q '^start f3fcaae2f3fcaae2f3fcaae2f3fcaae2$' "$DOCKER_LOG"
+if grep -q '^start 6c51bbc2' "$DOCKER_LOG"; then
+  echo "migrate failure started the already exited api" >&2
+  exit 1
+fi
+[[ "$(cat "$PRE/web/package.json")" == '{"name":"old-web"}' ]]
+[[ "$(cat "$PRE/api/app/captcha.py")" == "old-captcha" ]]
 [[ "$(cat "$PRE/.env")" == "SECRET=keep" ]]
 [[ "$(cat "$PRE/jobs/create-admin.sh")" == "ADMIN-KEEP" ]]
 : > "$DOCKER_LOG"
@@ -509,8 +553,25 @@ for line in lines:
         kinds.append("static")
 if kinds != ["build", "smoke", "stop", "migrate", "static"]:
     raise SystemExit("sequence %s" % kinds)
+docker_opts = ("-v", "-w", "-e", "--network", "--entrypoint", "--env-file", "-p")
+for line in lines:
+    if not line.startswith("run "):
+        continue
+    parts = line.split()
+    image_at = next((i for i, part in enumerate(parts) if part.startswith("sha256:") or part.startswith("docker.m.daocloud.io/") or part.startswith("node:")), None)
+    if image_at is None:
+        raise SystemExit("docker run has no image: " + line)
+    for opt in docker_opts:
+        if opt in parts and parts.index(opt) > image_at:
+            raise SystemExit("docker option after image: " + line)
 if not any(line.startswith("run ") and "sha256:" in line and "APP_IMPORT_OK" in line for line in lines):
     raise SystemExit("smoke did not use image id")
 print("deploy sequence ok")
 PY
+set +e
+"$BIN/docker" run --rm --pull=false --entrypoint python3 sha256:abc -v /src:/app:ro -w /app -c 'print(1)' >/dev/null 2>"$TMP/bad-run.err"
+BAD_RUN_RC=$?
+set -e
+[[ "$BAD_RUN_RC" -eq 99 ]]
+grep -q 'docker option after image' "$TMP/bad-run.err"
 echo "shell checks ok"

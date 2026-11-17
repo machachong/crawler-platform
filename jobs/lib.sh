@@ -245,26 +245,49 @@ preflight() {
   collect_inspect "$INSPECT_FILE"
   mkdir -p "$ROOT/jobs/state"
   chmod 700 "$ROOT/jobs/state"
-  py checks.py discover \
+  contract_tmp=$(mktemp "$ROOT/jobs/state/contract.json.XXXXXX")
+  runtime_tmp=$(mktemp "$ROOT/jobs/state/compose.runtime.yml.XXXXXX")
+  chmod 600 "$contract_tmp" "$runtime_tmp"
+  if ! py checks.py discover \
     --root "$ROOT" \
     --inspect "$INSPECT_FILE" \
     --expect-project "$EXPECT_PROJECT" \
     --expect-volume "$EXPECT_VOLUME" \
-    > "$ROOT/jobs/state/contract.json"
-  chmod 600 "$ROOT/jobs/state/contract.json"
+    > "$contract_tmp"; then
+    rm -f "$contract_tmp" "$runtime_tmp"
+    die "预检未通过。已有 contract.json 保持不变。"
+  fi
   rm -f "$INSPECT_FILE"
   INSPECT_FILE=
-  py checks.py write-runtime \
-    --contract "$ROOT/jobs/state/contract.json" \
-    --output "$ROOT/jobs/state/compose.runtime.yml"
+  if ! py checks.py write-runtime \
+    --contract "$contract_tmp" \
+    --output "$runtime_tmp"; then
+    rm -f "$contract_tmp" "$runtime_tmp"
+    die "预检未通过。已有 contract.json 保持不变。"
+  fi
+  PROJECT=$(py checks.py print-field --contract "$contract_tmp" --field project)
+  runtime_prev="$ROOT/jobs/state/compose.runtime.yml.keep"
+  rm -f "$runtime_prev"
+  if [[ -f "$ROOT/jobs/state/compose.runtime.yml" ]]; then
+    mv "$ROOT/jobs/state/compose.runtime.yml" "$runtime_prev"
+  fi
+  mv "$runtime_tmp" "$ROOT/jobs/state/compose.runtime.yml"
   chmod 600 "$ROOT/jobs/state/compose.runtime.yml"
-  PROJECT=$(py checks.py print-field --contract "$ROOT/jobs/state/contract.json" --field project)
   CONFIG_FILE=$(mktemp)
   chmod 600 "$CONFIG_FILE"
-  run_compose 120 config > "$CONFIG_FILE"
-  py checks.py check-rendered --contract "$ROOT/jobs/state/contract.json" --config "$CONFIG_FILE"
-  rm -f "$CONFIG_FILE"
+  if ! run_compose 120 config > "$CONFIG_FILE" \
+    || ! py checks.py check-rendered --contract "$contract_tmp" --config "$CONFIG_FILE"; then
+    rm -f "$CONFIG_FILE" "$contract_tmp" "$ROOT/jobs/state/compose.runtime.yml"
+    CONFIG_FILE=
+    if [[ -f "$runtime_prev" ]]; then
+      mv "$runtime_prev" "$ROOT/jobs/state/compose.runtime.yml"
+    fi
+    die "预检未通过。已有 contract.json 和 compose.runtime.yml 保持不变。"
+  fi
+  rm -f "$CONFIG_FILE" "$runtime_prev"
   CONFIG_FILE=
+  mv -f "$contract_tmp" "$ROOT/jobs/state/contract.json"
+  chmod 600 "$ROOT/jobs/state/contract.json"
   py checks.py print-contract --contract "$ROOT/jobs/state/contract.json"
   if [[ "${CRAWLER_TESTING:-}" != "1" && ! -d /var/www/zhengaihe/crawler ]]; then
     die "静态目录不存在: /var/www/zhengaihe/crawler"

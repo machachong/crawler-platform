@@ -179,19 +179,24 @@ save_previous_app() {
   APP_ID_FILE="$ROOT/jobs/state/previous-app.ids"
   mkdir -p "$ROOT/jobs/state"
   chmod 700 "$ROOT/jobs/state"
-  docker ps -a \
+  docker ps \
     --filter "label=com.docker.compose.project=${PROJECT}" \
     --filter "label=com.docker.compose.oneoff=False" \
     --format '{{.Label "com.docker.compose.service"}} {{.ID}} {{.Image}}' \
     | awk '$1 == "api" || $1 == "worker" || $1 == "scheduler" { print }' \
     > "$APP_ID_FILE"
   chmod 600 "$APP_ID_FILE"
+  API_ENV_ID=$(docker ps -aq \
+    --filter "label=com.docker.compose.project=${PROJECT}" \
+    --filter "label=com.docker.compose.service=api" \
+    --filter "label=com.docker.compose.oneoff=False")
+  [[ -n "$API_ENV_ID" && "$API_ENV_ID" != *$'\n'* ]] || die "找不到唯一的现有 API 容器，无法复制环境变量。不会新建容器。"
 }
 
 restore_previous_app() {
   local svc id image
   if [[ ! -s "${APP_ID_FILE:-}" ]]; then
-    say "没有停止前的 api/worker/scheduler 容器记录。不会新建容器。"
+    say "没有停止前仍在运行的 api/worker/scheduler。不会启动已经退出的旧容器。"
     return 0
   fi
   while read -r svc id image; do
@@ -254,24 +259,33 @@ build_app_image() {
 }
 
 pin_app_image() {
-  "$PY" - "$ROOT/jobs/state/contract.json" "$APP_IMAGE" <<'PY'
+  local tmp_contract tmp_runtime
+  tmp_contract=$(mktemp "$ROOT/jobs/state/contract.json.XXXXXX")
+  tmp_runtime=$(mktemp "$ROOT/jobs/state/compose.runtime.yml.XXXXXX")
+  chmod 600 "$tmp_contract" "$tmp_runtime"
+  "$PY" - "$ROOT/jobs/state/contract.json" "$tmp_contract" "$APP_IMAGE" <<'PY'
 import json, sys
-path, image = sys.argv[1], sys.argv[2]
-with open(path, encoding="utf-8") as handle:
+source, dest, image = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(source, encoding="utf-8") as handle:
     contract = json.load(handle)
 contract["app_image"] = image
-with open(path, "w", encoding="utf-8") as handle:
+with open(dest, "w", encoding="utf-8") as handle:
     json.dump(contract, handle)
 PY
-  chmod 600 "$ROOT/jobs/state/contract.json"
-  py checks.py write-runtime --contract "$ROOT/jobs/state/contract.json" --output "$ROOT/jobs/state/compose.runtime.yml"
-  chmod 600 "$ROOT/jobs/state/compose.runtime.yml"
+  if ! py checks.py write-runtime --contract "$tmp_contract" --output "$tmp_runtime"; then
+    rm -f "$tmp_contract" "$tmp_runtime"
+    die "写入运行编排失败。contract.json 保持不变。"
+  fi
+  mv -f "$tmp_contract" "$ROOT/jobs/state/contract.json"
+  mv -f "$tmp_runtime" "$ROOT/jobs/state/compose.runtime.yml"
+  chmod 600 "$ROOT/jobs/state/contract.json" "$ROOT/jobs/state/compose.runtime.yml"
 }
 
 smoke_new_image() {
   say "停止旧服务之前，用新镜像 ID 和目标源码检查导入"
-  docker run --rm --pull=false --entrypoint python3 "$APP_IMAGE" \
+  docker run --rm --pull=false --entrypoint python3 \
     -v "$SOURCE_ROOT/api:/app:ro" -w /app \
+    "$APP_IMAGE" \
     -c 'import sys,PIL,markdown_it,app.main; print("executable="+sys.executable); print("PIL="+PIL.__file__); print("APP_IMPORT_OK")'
 }
 
@@ -282,6 +296,8 @@ backup_private() {
   chmod 700 "$BACKUP"
   tar -C "$ROOT" -czf "$BACKUP/api-before.tar.gz" api
   [[ -s "$BACKUP/api-before.tar.gz" ]] || die "api 备份是空的"
+  tar -C "$ROOT" -czf "$BACKUP/web-before.tar.gz" web
+  [[ -s "$BACKUP/web-before.tar.gz" ]] || die "web 备份是空的"
   if [[ "${CRAWLER_TESTING:-}" == "1" ]]; then
     static=$CRAWLER_STATIC_ROOT
   else
@@ -316,10 +332,10 @@ rollback_tree() {
   local static
   if [[ "$SOURCE_SWAPPED" == "1" && -f "$BACKUP/api-before.tar.gz" ]]; then
     tar -C "$ROOT" -xzf "$BACKUP/api-before.tar.gz"
-    if [[ -d "$SOURCE_ROOT/web" && -f "$BACKUP/static-before.tar.gz" ]]; then
-      :
+    if [[ -f "$BACKUP/web-before.tar.gz" ]]; then
+      tar -C "$ROOT" -xzf "$BACKUP/web-before.tar.gz"
     fi
-    say "已恢复切换前的 api 目录"
+    say "已恢复切换前的 api 和 web 目录"
   fi
   if [[ "${CRAWLER_TESTING:-}" == "1" ]]; then
     static=$CRAWLER_STATIC_ROOT
@@ -391,18 +407,18 @@ stop_app
 APP_STOPPED=1
 NET=$(py checks.py print-field --contract "$ROOT/jobs/state/contract.json" --field network)
 if [[ "$SKIP_MIGRATE" != "1" ]]; then
-  if ! docker run --rm --pull=false --network "$NET" --entrypoint python3 "$APP_IMAGE" \
+  if ! docker run --rm --pull=false --network "$NET" --entrypoint python3 \
       -v "$ROOT/api:/app:ro" -w /app \
       -e DATABASE_URL=postgresql://user:pass@db:5432/crawler_db \
       -e REDIS_URL=redis://redis:6379/0 \
+      "$APP_IMAGE" \
       scripts/migrate_v2.py; then
-    fail_deploy "迁移失败。已尝试恢复源码和停止前的容器。数据库备份不会自动恢复。日志: ${LOG_FILE}"
+    fail_deploy "迁移失败。已尝试恢复 api、web 和已发布的静态目录，并只启动停止前仍在运行的容器。数据库备份不会自动恢复。日志: ${LOG_FILE}"
   fi
 fi
 run_compose 180 up -d --no-build --no-recreate --no-deps db redis
 ENV_FILE="$BACKUP/api.env"
-api_id=$(awk '$1 == "api" { print $2; exit }' "$APP_ID_FILE")
-docker inspect "$api_id" --format '{{range .Config.Env}}{{println .}}{{end}}' > "$ENV_FILE"
+docker inspect "$API_ENV_ID" --format '{{range .Config.Env}}{{println .}}{{end}}' > "$ENV_FILE"
 chmod 600 "$ENV_FILE"
 start_named() {
   local name="$1"; shift
@@ -419,7 +435,7 @@ if ! start_named crawler-main-api -p 8010:8000 --label com.docker.compose.servic
   fail_deploy "新 API 容器没有用目标镜像启动。日志: ${LOG_FILE}"
 fi
 if ! wait_api; then
-  fail_deploy "新 API 未通过健康检查。已尝试退回旧容器和旧源码。数据库备份不会自动恢复。日志: ${LOG_FILE}"
+  fail_deploy "新 API 未通过健康检查。已尝试恢复 api、web 和已发布的静态目录，并只启动停止前仍在运行的容器。数据库备份不会自动恢复。日志: ${LOG_FILE}"
 fi
 start_named crawler-main-worker --label com.docker.compose.service=worker \
   --entrypoint celery "$APP_IMAGE" -A app.worker.tasks worker --loglevel=info --concurrency=2 \
@@ -434,7 +450,7 @@ service_id redis >/dev/null
 assert_db_redis_unchanged
 if [[ "$SKIP_STATIC" != "1" ]]; then
   STATIC_SWAPPED=1
-  build_static || fail_deploy "静态发布失败。已尝试恢复旧静态目录和旧容器。日志: ${LOG_FILE}"
+  build_static || fail_deploy "静态发布失败。已尝试恢复 api、web 和已发布的静态目录，并只启动停止前仍在运行的容器。日志: ${LOG_FILE}"
 fi
 write_release
 say "部署完成。退出码将记为 0。日志: ${LOG_FILE}"

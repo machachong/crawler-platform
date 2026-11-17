@@ -170,6 +170,19 @@ def test_discover_hides_secrets_and_requires_identity() -> None:
         fail("db image was not the observed sha256")
     if found["redis_volume"] != "f" * 64:
         fail("redis data volume was not preserved")
+    exited = json.loads(json.dumps(containers))
+    exited[2]["State"] = {"Status": "exited"}
+    exited[4]["State"] = {"Status": "exited"}
+    recovered = checks.discover(exited, root, "crawler-platform", "crawler-platform_postgres_data")
+    if recovered["ports"]["api"]["host_port"] != 8010:
+        fail("exited api port was dropped")
+    exited[3]["State"] = {"Status": "exited"}
+    also_worker = checks.discover(exited, root, "crawler-platform", "crawler-platform_postgres_data")
+    if also_worker["ports"]["redis"]["host_port"] != 6380:
+        fail("exited worker dropped redis")
+    exited[0]["State"] = {"Status": "exited"}
+    if raises(lambda: checks.discover(exited, root, "crawler-platform", "crawler-platform_postgres_data")) is None:
+        fail("exited database was accepted")
     pinned = checks.runtime_yaml(found)
     if "postgres:15-alpine" in pinned or "redis:7-alpine" in pinned or "daocloud.io" in pinned:
         fail("runtime selected a registry tag instead of the running image id")

@@ -158,14 +158,20 @@ def discover(containers: list, root: str, expect_project: str, expect_volume: st
     }
     if "web" in running:
         raise GuardError("web 服务正在运行。生产启动不能启用 local-web")
-    missing = DEFAULT_SERVICES - running
-    extra = running - DEFAULT_SERVICES
-    if missing or extra:
-        raise GuardError(f"运行中的服务必须正好是 api、db、redis、worker、scheduler，当前运行: {sorted(running)}")
-    for service in ("api", "db", "redis"):
+    for service in ("db", "redis"):
+        if service not in by_service:
+            raise GuardError(f"缺少 {service} 容器，拒绝继续")
+        if ((by_service[service].get("State") or {}).get("Status")) != "running":
+            raise GuardError(f"{service} 没有在运行，拒绝继续")
         health = (((by_service[service].get("State") or {}).get("Health") or {}).get("Status"))
         if health != "healthy":
             raise GuardError(f"{service} 容器健康状态不是 healthy")
+    for service in ("api", "worker", "scheduler"):
+        if service not in by_service:
+            raise GuardError(f"缺少 {service} 容器。已退出的应用容器可以继续，但不能没有容器记录")
+    extra = running - DEFAULT_SERVICES
+    if extra:
+        raise GuardError(f"有预期之外的运行服务: {sorted(extra)}")
     ports = {}
     for service, expected in REQUIRED_PORTS.items():
         bindings = _bindings(by_service[service])
@@ -757,11 +763,14 @@ def main(argv: list[str]) -> None:
         raise SystemExit(0 if running else 1)
     if command == "write-runtime":
         contract = load_json(Path(_arg(argv, "--contract")))
+        text = runtime_yaml(contract)
         output = Path(_arg(argv, "--output"))
         output.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        temporary = output.with_name(output.name + ".tmp")
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(runtime_yaml(contract))
+            handle.write(text)
+        os.replace(temporary, output)
         return
     if command == "check-config":
         check_config(load_json(Path(_arg(argv, "--config"))), load_json(Path(_arg(argv, "--contract"))))
